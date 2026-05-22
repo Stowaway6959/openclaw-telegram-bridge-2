@@ -227,6 +227,33 @@ def ask_ai(question):
     except Exception as e:
         return f"AI error: {e}"
 
+def motion_watcher():
+    COOLDOWN    = 60
+    last_alert  = 0
+    was_motion  = False
+    url = (f"http://{CAMERA_HOST}/cgi-bin/api.cgi?cmd=GetMdState"
+           f"&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
+    while True:
+        try:
+            r    = subprocess.run(["curl", "-s", "--connect-timeout", "3", url],
+                                  capture_output=True, text=True, timeout=5)
+            data = json.loads(r.stdout)
+            state = data[0]['value']['state']
+            now   = time.time()
+            if state == 1 and not was_motion and (now - last_alert) >= COOLDOWN:
+                img = capture_camera()
+                if img:
+                    send_telegram("🚨 Motion detected — Front", img)
+                    send_ntfy("Motion Alert", "Front camera motion detected", "high")
+                last_alert = now
+                was_motion = True
+                print("🚨 Motion detected")
+            elif state == 0:
+                was_motion = False
+        except:
+            pass
+        time.sleep(3)
+
 def get_briefing():
     m = get_markets()
     w = get_weather(DEFAULT_LOCATION, 1)
@@ -280,7 +307,9 @@ def listen_for_telegram():
     global last_update_id
     print("🤖 Telegram bridge #2 running (Claude AI)")
     threading.Thread(target=scheduler, daemon=True).start()
+    threading.Thread(target=motion_watcher, daemon=True).start()
     print("⏰ Morning briefing scheduled at 6:30 AM CT")
+    print("👁 Motion watcher active (60s cooldown)")
     request_calendar_access()
     while True:
         try:
