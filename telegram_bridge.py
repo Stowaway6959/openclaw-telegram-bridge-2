@@ -154,20 +154,34 @@ def _fetch_rss(url, count):
             results.append((title, link))
     return results
 
+def _fetch_reddit(subreddit, count):
+    req  = urllib.request.Request(f"https://www.reddit.com/r/{subreddit}/hot.json?limit={count}",
+                                   headers={"User-Agent": "OpenClaw-Bridge/1.0"})
+    data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+    results = []
+    for post in data['data']['children'][:count]:
+        p = post['data']
+        results.append((p['title'], f"https://reddit.com{p['permalink']}"))
+    return results
+
 def get_news():
     try:
-        feeds = [
-            ("https://feeds.bbci.co.uk/news/rss.xml", 2),
+        result = "📰 News:\n\n"
+        rss_feeds = [
             ("https://feeds.npr.org/1001/rss.xml", 2),
             ("https://www.ozarksfirst.com/feed", 2),
         ]
-        result = "📰 News:\n\n"
-        for url, count in feeds:
+        for url, count in rss_feeds:
             try:
                 for title, link in _fetch_rss(url, count):
                     result += f"• {title}\n  {link}\n\n" if link else f"• {title}\n\n"
             except:
                 continue
+        try:
+            for title, link in _fetch_reddit("springfieldMO", 3):
+                result += f"• 🟠 {title}\n  {link}\n\n"
+        except:
+            pass
         return result.strip()
     except:
         return ""
