@@ -244,7 +244,6 @@ def motion_watcher():
                 img = capture_camera()
                 if img:
                     send_telegram("🚨 Motion detected — Front", img)
-                    send_ntfy("Motion Alert", "Front camera motion detected", "high")
                 last_alert = now
                 was_motion = True
                 print("🚨 Motion detected")
