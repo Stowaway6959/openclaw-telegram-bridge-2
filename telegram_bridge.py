@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from EventKit import EKEventStore, EKEntityTypeEvent, EKEntityTypeReminder
 import urllib.request, urllib.parse
 from dotenv import load_dotenv
+from PIL import Image, ImageFilter
 import anthropic
 
 load_dotenv()
@@ -228,30 +229,35 @@ def ask_ai(question):
         return f"AI error: {e}"
 
 def motion_watcher():
-    COOLDOWN    = 60
-    last_alert  = 0
-    was_motion  = False
-    url = (f"http://{CAMERA_HOST}/cgi-bin/api.cgi?cmd=GetMdState"
-           f"&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
+    SNAPSHOT_INTERVAL = 2
+    COOLDOWN          = 60
+    PIXEL_THRESHOLD   = 30
+    CHANGED_PCT       = 0.005
+    last_alert        = 0
+    prev_gray         = None
+    img_path          = "/tmp/motion_front.jpg"
+    cam_url           = (f"http://{CAMERA_HOST}/cgi-bin/api.cgi?cmd=Snap"
+                         f"&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
     while True:
         try:
-            r    = subprocess.run(["curl", "-s", "--connect-timeout", "3", url],
-                                  capture_output=True, text=True, timeout=5)
-            data = json.loads(r.stdout)
-            state = data[0]['value']['state']
-            now   = time.time()
-            if state == 1 and not was_motion and (now - last_alert) >= COOLDOWN:
-                img = capture_camera()
-                if img:
-                    send_telegram("🚨 Motion detected — Front", img)
-                last_alert = now
-                was_motion = True
-                print("🚨 Motion detected")
-            elif state == 0:
-                was_motion = False
-        except:
-            pass
-        time.sleep(3)
+            r = subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img_path],
+                               capture_output=True)
+            if r.returncode == 0 and os.path.exists(img_path) and os.path.getsize(img_path) > 10000:
+                img    = Image.open(img_path).convert("L").resize((320, 240))
+                img    = img.filter(ImageFilter.GaussianBlur(2))
+                pixels = list(img.getdata())
+                if prev_gray is not None:
+                    changed = sum(1 for a, b in zip(pixels, prev_gray) if abs(a - b) > PIXEL_THRESHOLD)
+                    if (changed / len(pixels)) > CHANGED_PCT:
+                        now = time.time()
+                        if now - last_alert >= COOLDOWN:
+                            send_telegram("🚨 Motion detected — Front", img_path)
+                            last_alert = now
+                            print("🚨 Front motion detected")
+                prev_gray = pixels
+        except Exception as e:
+            print(f"Motion error: {e}")
+        time.sleep(SNAPSHOT_INTERVAL)
 
 def get_briefing():
     m = get_markets()
