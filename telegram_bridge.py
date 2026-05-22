@@ -385,26 +385,18 @@ def send_auto_briefing(btype):
         print("Market close sent!")
 
 def scheduler():
-    TZ                    = ZoneInfo("America/Chicago")
-    last_morning_sent     = None
-    last_evening_sent     = None
-    last_open_sent        = None
-    last_close_sent       = None
+    TZ                = ZoneInfo("America/Chicago")
+    last_morning_sent = None
+    last_evening_sent = None
     while True:
         now   = datetime.now(TZ)
         today = now.date()
-        if now.hour == 6 and now.minute == 30 and last_morning_sent != today:
+        if now.hour == 6 and now.minute == 0 and last_morning_sent != today:
             send_auto_briefing("morning")
             last_morning_sent = today
         if now.hour == 18 and now.minute == 0 and last_evening_sent != today:
             send_auto_briefing("evening")
             last_evening_sent = today
-        if now.hour == 6 and now.minute == 0 and last_open_sent != today:
-            send_auto_briefing("market_open")
-            last_open_sent = today
-        if now.hour == 18 and now.minute == 5 and last_close_sent != today:
-            send_auto_briefing("market_close")
-            last_close_sent = today
         time.sleep(30)
 
 def listen_for_telegram():
