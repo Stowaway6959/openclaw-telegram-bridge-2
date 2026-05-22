@@ -367,13 +367,11 @@ def get_briefing():
     sun  = get_sun_times()
     e    = get_calendar_today()
     r    = get_reminders_today()
-    up   = get_upcoming_reminders(7)
     news = get_news()
     parts = [f"☀️ Good Morning!\n\n{m}\n\n{w}"]
     if sun:  parts.append(sun)
     parts.append(e)
     parts.append(r)
-    if up:   parts.append(up)
     if news: parts.append(news)
     return "\n\n".join(parts)
 
@@ -381,10 +379,8 @@ def get_evening_briefing():
     m    = get_markets()
     w    = get_weather(DEFAULT_LOCATION, 2)
     r    = get_reminders_tomorrow()
-    up   = get_upcoming_reminders(7)
     news = get_news()
     parts = [f"🌙 Good Evening!\n\n{m}\n\n{w}\n\n{r}"]
-    if up:   parts.append(up)
     if news: parts.append(news)
     return "\n\n".join(parts)
 
