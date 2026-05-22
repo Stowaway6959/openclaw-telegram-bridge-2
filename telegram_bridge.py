@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from EventKit import EKEventStore, EKEntityTypeEvent, EKEntityTypeReminder
 import urllib.request, urllib.parse
+import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 import anthropic
 
@@ -23,11 +24,13 @@ WEATHER_API_KEY  = os.getenv("WEATHER_API_KEY")
 DEFAULT_LOCATION = os.getenv("DEFAULT_LOCATION", "65802")
 GOLDAPI_KEY      = os.getenv("GOLDAPI_KEY")
 NTFY_TOPIC       = os.getenv("NTFY_TOPIC", "openclaw-sar")
+NOTES_FILE       = os.path.join(os.path.dirname(__file__), "notes.txt")
 
-ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-
-store = EKEventStore.alloc().init()
-last_update_id = 0
+ai_client  = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+store      = EKEventStore.alloc().init()
+last_update_id   = 0
+bot_start_time   = time.time()
+last_motion_time = [0]
 
 def request_calendar_access():
     store.requestAccessToEntityType_completion_(EKEntityTypeEvent, lambda g, e: None)
@@ -127,6 +130,108 @@ def get_weather(location=None, days=1):
             return r
     except:
         return "Weather error"
+
+def get_sun_times():
+    try:
+        url  = f"http://api.weatherapi.com/v1/astronomy.json?key={WEATHER_API_KEY}&q={DEFAULT_LOCATION}"
+        r    = subprocess.run(["curl", "-s", url], capture_output=True, text=True)
+        data = json.loads(r.stdout)
+        astro = data['astronomy']['astro']
+        return f"🌅 Sunrise: {astro['sunrise']}  🌇 Sunset: {astro['sunset']}"
+    except:
+        return ""
+
+def get_news():
+    try:
+        req  = urllib.request.Request("https://feeds.reuters.com/reuters/topNews",
+                                      headers={"User-Agent": "Mozilla/5.0"})
+        raw  = urllib.request.urlopen(req, timeout=10).read()
+        root = ET.fromstring(raw)
+        items = root.findall('./channel/item')[:5]
+        result = "📰 Top News:\n\n"
+        for item in items:
+            title = item.findtext('title', '').strip()
+            if title:
+                result += f"• {title}\n"
+        return result.strip()
+    except:
+        return ""
+
+def get_upcoming_reminders(days=7):
+    try:
+        calendars = store.calendarsForEntityType_(EKEntityTypeReminder)
+        predicate = store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(None, None, calendars)
+        all_rem   = []
+        def cb(rem):
+            if rem: all_rem.extend(rem)
+        store.fetchRemindersMatchingPredicate_completion_(predicate, cb)
+        time.sleep(3)
+        today    = date.today()
+        cutoff   = today + timedelta(days=days)
+        upcoming = []
+        for r in all_rem:
+            dc = r.dueDateComponents()
+            if dc is None: continue
+            try:
+                rd = date(dc.year(), dc.month(), dc.day())
+                if today <= rd <= cutoff:
+                    upcoming.append((rd, r.title()))
+            except:
+                continue
+        upcoming.sort()
+        if not upcoming:
+            return ""
+        result = "⏰ Coming up:\n\n"
+        for rd, title in upcoming:
+            delta = (rd - today).days
+            label = "today" if delta == 0 else f"in {delta}d"
+            result += f"• {title} ({label})\n"
+        return result.strip()
+    except:
+        return ""
+
+def get_public_ip():
+    try:
+        r = subprocess.run(["curl", "-s", "https://api.ipify.org"], capture_output=True, text=True, timeout=10)
+        return f"🌐 Public IP: {r.stdout.strip()}"
+    except:
+        return "IP unavailable"
+
+def get_status():
+    uptime_secs = int(time.time() - bot_start_time)
+    h, m        = divmod(uptime_secs // 60, 60)
+    uptime_str  = f"{h}h {m}m" if h else f"{m}m"
+    if last_motion_time[0]:
+        ago = int((time.time() - last_motion_time[0]) / 60)
+        motion_str = f"{ago}m ago"
+    else:
+        motion_str = "none"
+    try:
+        url    = f"http://api.weatherapi.com/v1/current.json?key={WEATHER_API_KEY}&q={DEFAULT_LOCATION}"
+        r      = subprocess.run(["curl", "-s", url], capture_output=True, text=True)
+        data   = json.loads(r.stdout)
+        w      = f"{data['current']['temp_f']}°F, {data['current']['condition']['text']}"
+    except:
+        w = "unavailable"
+    return f"🤖 Bridge 2 AIR\n\nUptime: {uptime_str}\nLast motion: {motion_str}\nWeather: {w}"
+
+def save_note(text):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    with open(NOTES_FILE, "a") as f:
+        f.write(f"[{ts}] {text}\n")
+    return f"✅ Note saved"
+
+def get_notes():
+    if not os.path.exists(NOTES_FILE):
+        return "📝 No notes yet"
+    with open(NOTES_FILE) as f:
+        lines = f.readlines()
+    if not lines:
+        return "📝 No notes yet"
+    result = f"📝 Notes ({len(lines)}):\n\n"
+    for line in lines[-10:]:
+        result += line
+    return result.strip()
 
 def get_reminders_today():
     calendars  = store.calendarsForEntityType_(EKEntityTypeReminder)
@@ -228,17 +333,29 @@ def ask_ai(question):
         return f"AI error: {e}"
 
 def get_briefing():
-    m = get_markets()
-    w = get_weather(DEFAULT_LOCATION, 1)
-    e = get_calendar_today()
-    r = get_reminders_today()
-    return f"☀️ Good Morning!\n\n{m}\n\n{w}\n\n{e}\n\n{r}"
+    m    = get_markets()
+    w    = get_weather(DEFAULT_LOCATION, 1)
+    sun  = get_sun_times()
+    e    = get_calendar_today()
+    r    = get_reminders_today()
+    up   = get_upcoming_reminders(7)
+    news = get_news()
+    parts = [f"☀️ Good Morning!\n\n{m}\n\n{w}"]
+    if sun:  parts.append(sun)
+    parts.append(e)
+    parts.append(r)
+    if up:   parts.append(up)
+    if news: parts.append(news)
+    return "\n\n".join(parts)
 
 def get_evening_briefing():
-    m = get_markets()
-    w = get_weather(DEFAULT_LOCATION, 2)
-    r = get_reminders_tomorrow()
-    return f"🌙 Good Evening!\n\n{m}\n\n{w}\n\n{r}"
+    m  = get_markets()
+    w  = get_weather(DEFAULT_LOCATION, 2)
+    r  = get_reminders_tomorrow()
+    up = get_upcoming_reminders(7)
+    parts = [f"🌙 Good Evening!\n\n{m}\n\n{w}\n\n{r}"]
+    if up: parts.append(up)
+    return "\n\n".join(parts)
 
 def send_auto_briefing(btype):
     if btype == "morning":
@@ -260,11 +377,19 @@ def send_auto_briefing(btype):
             send_telegram(f"📷 {ts}", img)
             send_ntfy("Camera Snapshot", f"Snapshot taken at {ts}", "low")
             print("Camera sent!")
+    elif btype == "market_open":
+        send_telegram(f"🔔 Market Open\n\n{get_markets()}")
+        print("Market open sent!")
+    elif btype == "market_close":
+        send_telegram(f"🔔 Market Close\n\n{get_markets()}")
+        print("Market close sent!")
 
 def scheduler():
-    TZ                   = ZoneInfo("America/Chicago")
-    last_morning_sent    = None
-    last_evening_sent    = None
+    TZ                    = ZoneInfo("America/Chicago")
+    last_morning_sent     = None
+    last_evening_sent     = None
+    last_open_sent        = None
+    last_close_sent       = None
     while True:
         now   = datetime.now(TZ)
         today = now.date()
@@ -274,13 +399,20 @@ def scheduler():
         if now.hour == 18 and now.minute == 0 and last_evening_sent != today:
             send_auto_briefing("evening")
             last_evening_sent = today
+        if now.weekday() < 5:
+            if now.hour == 9 and now.minute == 30 and last_open_sent != today:
+                send_auto_briefing("market_open")
+                last_open_sent = today
+            if now.hour == 16 and now.minute == 0 and last_close_sent != today:
+                send_auto_briefing("market_close")
+                last_close_sent = today
         time.sleep(30)
 
 def listen_for_telegram():
     global last_update_id
     print("🤖 Telegram bridge #2 running (Claude AI)")
     threading.Thread(target=scheduler, daemon=True).start()
-    print("⏰ Morning briefing scheduled at 6:30 AM CT")
+    print("⏰ Scheduler active: 6:30am morning, 9:30am market open, 4pm market close, 6pm evening")
     request_calendar_access()
     while True:
         try:
@@ -292,14 +424,12 @@ def listen_for_telegram():
                     if 'message' in update and 'text' in update['message']:
                         msg = update['message']['text']
                         print(f"📨 {msg}")
-                        cmd = msg.lower()
+                        cmd = msg.lower().strip()
                         if cmd in ['camera', 'snapshot', 'cam']:
                             img1 = capture_camera()
                             img2 = capture_camera2()
-                            if img1:
-                                send_telegram("📷 Front", img1)
-                            if img2:
-                                send_telegram("📷 Back", img2)
+                            if img1: send_telegram("📷 Front", img1)
+                            if img2: send_telegram("📷 Back", img2)
                             print("✅ Both cameras")
                         elif cmd == 'front':
                             img = capture_camera()
@@ -333,6 +463,22 @@ def listen_for_telegram():
                         elif cmd in ['briefing', 'daily']:
                             send_telegram(get_briefing())
                             print("✅ Briefing")
+                        elif cmd == 'status':
+                            send_telegram(get_status())
+                            print("✅ Status")
+                        elif cmd == 'ip':
+                            send_telegram(get_public_ip())
+                            print("✅ IP")
+                        elif cmd == 'news':
+                            n = get_news()
+                            send_telegram(n if n else "No news available")
+                            print("✅ News")
+                        elif cmd == 'notes':
+                            send_telegram(get_notes())
+                            print("✅ Notes")
+                        elif cmd.startswith('note '):
+                            send_telegram(save_note(msg[5:].strip()))
+                            print("✅ Note saved")
                         else:
                             print("🤖 Asking Claude...")
                             send_telegram(ask_ai(msg))
