@@ -399,13 +399,12 @@ def scheduler():
         if now.hour == 18 and now.minute == 0 and last_evening_sent != today:
             send_auto_briefing("evening")
             last_evening_sent = today
-        if now.weekday() < 5:
-            if now.hour == 9 and now.minute == 30 and last_open_sent != today:
-                send_auto_briefing("market_open")
-                last_open_sent = today
-            if now.hour == 16 and now.minute == 0 and last_close_sent != today:
-                send_auto_briefing("market_close")
-                last_close_sent = today
+        if now.hour == 6 and now.minute == 0 and last_open_sent != today:
+            send_auto_briefing("market_open")
+            last_open_sent = today
+        if now.hour == 18 and now.minute == 5 and last_close_sent != today:
+            send_auto_briefing("market_close")
+            last_close_sent = today
         time.sleep(30)
 
 def listen_for_telegram():
