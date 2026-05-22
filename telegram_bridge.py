@@ -143,7 +143,7 @@ def get_sun_times():
 
 def get_news():
     try:
-        req  = urllib.request.Request("https://feeds.reuters.com/reuters/topNews",
+        req  = urllib.request.Request("https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
                                       headers={"User-Agent": "Mozilla/5.0"})
         raw  = urllib.request.urlopen(req, timeout=10).read()
         root = ET.fromstring(raw)
