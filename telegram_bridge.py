@@ -378,12 +378,14 @@ def get_briefing():
     return "\n\n".join(parts)
 
 def get_evening_briefing():
-    m  = get_markets()
-    w  = get_weather(DEFAULT_LOCATION, 2)
-    r  = get_reminders_tomorrow()
-    up = get_upcoming_reminders(7)
+    m    = get_markets()
+    w    = get_weather(DEFAULT_LOCATION, 2)
+    r    = get_reminders_tomorrow()
+    up   = get_upcoming_reminders(7)
+    news = get_news()
     parts = [f"🌙 Good Evening!\n\n{m}\n\n{w}\n\n{r}"]
-    if up: parts.append(up)
+    if up:   parts.append(up)
+    if news: parts.append(news)
     return "\n\n".join(parts)
 
 def send_auto_briefing(btype):
