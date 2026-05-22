@@ -157,9 +157,8 @@ def _fetch_rss(url, count):
 def get_news():
     try:
         feeds = [
-            ("https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml", 2),
-            ("https://feeds.bbci.co.uk/news/rss.xml", 1),
-            ("https://feeds.npr.org/1001/rss.xml", 1),
+            ("https://feeds.bbci.co.uk/news/rss.xml", 2),
+            ("https://feeds.npr.org/1001/rss.xml", 2),
             ("https://www.ozarksfirst.com/feed", 2),
         ]
         result = "📰 News:\n\n"
