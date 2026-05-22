@@ -151,8 +151,9 @@ def get_news():
         result = "📰 Top News:\n\n"
         for item in items:
             title = item.findtext('title', '').strip()
+            link  = item.findtext('link', '').strip()
             if title:
-                result += f"• {title}\n"
+                result += f"• {title}\n  {link}\n\n" if link else f"• {title}\n\n"
         return result.strip()
     except:
         return ""
