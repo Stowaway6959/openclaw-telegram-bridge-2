@@ -59,26 +59,18 @@ def send_ntfy(title, message, priority="default"):
     except Exception as e:
         print(f"ntfy error: {e}")
 
-def get_gold_price():
-    if GOLDAPI_KEY:
-        try:
-            req = urllib.request.Request(
-                "https://www.goldapi.io/api/XAU/USD",
-                headers={"x-access-token": GOLDAPI_KEY, "Content-Type": "application/json"}
-            )
-            data = json.loads(urllib.request.urlopen(req, timeout=10).read())
-            return f"🥇 Gold: ${data['price']:,.2f}/oz"
-        except:
-            pass
-    # fallback to Yahoo Finance
-    try:
-        r = subprocess.run(["curl", "-s", "-H", "User-Agent: Mozilla/5.0",
-                            "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d&range=1d"],
-                           capture_output=True, text=True, timeout=10)
-        price = json.loads(r.stdout)['chart']['result'][0]['meta']['regularMarketPrice']
-        return f"🥇 Gold: ${price:,.2f}/oz"
-    except:
-        return "🥇 Gold: Unavailable"
+def _arrow(chg):
+    return f"↗️ +{chg:.2f}%" if chg > 0 else f"↘️ {chg:.2f}%"
+
+def _yahoo_price_change(ticker):
+    r = subprocess.run(["curl", "-s", "-H", "User-Agent: Mozilla/5.0",
+                        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1d"],
+                       capture_output=True, text=True, timeout=10)
+    meta  = json.loads(r.stdout)['chart']['result'][0]['meta']
+    price = meta['regularMarketPrice']
+    prev  = meta.get('chartPreviousClose') or meta.get('previousClose', price)
+    chg   = (price - prev) / prev * 100
+    return price, chg
 
 def get_markets():
     result = ""
@@ -87,18 +79,26 @@ def get_markets():
                            capture_output=True, text=True, timeout=10)
         d = json.loads(r.stdout)
         p, c = d['bitcoin']['usd'], d['bitcoin']['usd_24h_change']
-        result += f"₿ Bitcoin: ${p:,.2f} ({'↗️ +' if c > 0 else '↘️ '}{c:.2f}%)\n"
+        result += f"₿ Bitcoin: ${p:,.2f} {_arrow(c)}\n"
     except:
         result += "₿ Bitcoin: Unavailable\n"
 
-    result += get_gold_price() + "\n"
+    try:
+        if GOLDAPI_KEY:
+            req  = urllib.request.Request("https://www.goldapi.io/api/XAU/USD",
+                                          headers={"x-access-token": GOLDAPI_KEY, "Content-Type": "application/json"})
+            data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+            chg  = data.get('ch_percentage', 0)
+            result += f"🥇 Gold: ${data['price']:,.2f}/oz {_arrow(chg)}\n"
+        else:
+            price, chg = _yahoo_price_change("GC=F")
+            result += f"🥇 Gold: ${price:,.2f}/oz {_arrow(chg)}\n"
+    except:
+        result += "🥇 Gold: Unavailable\n"
 
     try:
-        r = subprocess.run(["curl", "-s", "-H", "User-Agent: Mozilla/5.0",
-                            "https://query1.finance.yahoo.com/v8/finance/chart/SI=F?interval=1d&range=1d"],
-                           capture_output=True, text=True, timeout=10)
-        price = json.loads(r.stdout)['chart']['result'][0]['meta']['regularMarketPrice']
-        result += f"🥈 Silver: ${price:,.2f}/oz"
+        price, chg = _yahoo_price_change("SI=F")
+        result += f"🥈 Silver: ${price:,.2f}/oz {_arrow(chg)}"
     except:
         result += "🥈 Silver: Unavailable"
 
