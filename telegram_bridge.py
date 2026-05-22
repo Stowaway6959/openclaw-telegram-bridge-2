@@ -141,19 +141,34 @@ def get_sun_times():
     except:
         return ""
 
+def _fetch_rss(url, count):
+    req   = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    raw   = urllib.request.urlopen(req, timeout=10).read()
+    root  = ET.fromstring(raw)
+    items = root.findall('./channel/item')[:count]
+    results = []
+    for item in items:
+        title = item.findtext('title', '').strip()
+        link  = item.findtext('link', '').strip()
+        if title:
+            results.append((title, link))
+    return results
+
 def get_news():
     try:
-        req  = urllib.request.Request("https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
-                                      headers={"User-Agent": "Mozilla/5.0"})
-        raw  = urllib.request.urlopen(req, timeout=10).read()
-        root = ET.fromstring(raw)
-        items = root.findall('./channel/item')[:5]
-        result = "📰 Top News:\n\n"
-        for item in items:
-            title = item.findtext('title', '').strip()
-            link  = item.findtext('link', '').strip()
-            if title:
-                result += f"• {title}\n  {link}\n\n" if link else f"• {title}\n\n"
+        feeds = [
+            ("https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml", 2),
+            ("https://feeds.bbci.co.uk/news/rss.xml", 1),
+            ("https://feeds.npr.org/1001/rss.xml", 1),
+            ("https://www.ozarksfirst.com/feed", 2),
+        ]
+        result = "📰 News:\n\n"
+        for url, count in feeds:
+            try:
+                for title, link in _fetch_rss(url, count):
+                    result += f"• {title}\n  {link}\n\n" if link else f"• {title}\n\n"
+            except:
+                continue
         return result.strip()
     except:
         return ""
