@@ -112,44 +112,27 @@ def send_telegram_photo(path, caption):
 
 def handle_alert(event_type, prefetched_path):
     """
-    Called in a daemon thread. prefetched_path is already on disk (or None).
-    Flow:
-      1. Send stale snapshot immediately if one exists (perceived <1s)
-      2. Check cooldown — drop if too recent
-      3. Send fresh snapshot (already fetched in parallel with step 1+2)
+    Called in a daemon thread. prefetched_path snapshot pre-fetched in parallel.
+    Flow: cooldown check → wait for prefetch → send single fresh message.
     """
-    label  = EVENT_EMOJI.get(event_type, "🚨")
-    clock  = datetime.now().strftime("%I:%M:%S %p")
-
-    # Step 1 — instant stale send if we have a previous snap
-    stale_sent = False
-    if os.path.exists(SNAP_STALE) and os.path.getsize(SNAP_STALE) > 10000:
-        stale_ms = send_telegram_photo(SNAP_STALE, f"⚡ {label} — {clock} (live coming…)")
-        stale_sent = True
-        print(f"  [{ts()}] [stale:{event_type}] tg={stale_ms}ms", flush=True)
-
-    # Step 2 — cooldown check (after stale send so user already has something)
     now = time.time()
     with _lock:
         last = _last_sent.get(event_type, 0)
         if now - last < COOLDOWN:
             remaining = int(COOLDOWN - (now - last))
-            print(f"  [{ts()}] [cooldown:{event_type}] {remaining}s — skip fresh", flush=True)
+            print(f"  [{ts()}] [cooldown:{event_type}] {remaining}s — skip", flush=True)
             return
         _last_sent[event_type] = now
 
-    # Step 3 — send fresh snapshot (pre-fetched while stale was sending)
     fresh_ok = prefetched_path and os.path.exists(prefetched_path) and os.path.getsize(prefetched_path) > 10000
     if not fresh_ok:
-        # prefetch failed or wasn't done — fetch now as fallback
         t0 = time.time()
         fresh_ok = fetch_snapshot(SNAP_PATH)
         print(f"  [{ts()}] [snap fallback] {int((time.time()-t0)*1000)}ms", flush=True)
 
     if fresh_ok:
-        # promote fresh → stale for next event
-        import shutil
-        shutil.copy2(SNAP_PATH, SNAP_STALE)
+        label   = EVENT_EMOJI.get(event_type, "🚨")
+        clock   = datetime.now().strftime("%I:%M:%S %p")
         caption = f"🚨 FRONT — {label} — {clock}"
         send_ms = send_telegram_photo(SNAP_PATH, caption)
         print(f"  [{ts()}] [sent:{event_type}] tg={send_ms}ms — {caption}", flush=True)
