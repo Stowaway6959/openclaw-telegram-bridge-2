@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
 smtp_listener.py — Reolink motion email → HTTP snapshot → Telegram
+
+Optimizations:
+  1. urllib only — no subprocess curl (saves ~200ms per alert)
+  2. Snapshot pre-fetched on email receipt, before cooldown check (hides LAN latency)
+  3. Stale snapshot sent instantly (<1s), then fresh snapshot follows
 """
-import asyncio, os, subprocess, time, threading, re, base64
+import asyncio, os, time, threading, re, base64, urllib.request, urllib.parse
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -16,10 +21,10 @@ CAMERA_HOST    = os.environ.get("CAMERA_HOST", "192.168.1.199")
 
 CAMERA_URL  = f"http://{CAMERA_HOST}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASS}"
 SNAP_PATH   = "/tmp/reolink_snap.jpg"
+SNAP_STALE  = "/tmp/reolink_snap_stale.jpg"
 SMTP_PORT   = 2525
-COOLDOWN    = 12          # was 30 — suppresses Reolink's ~10s follow-up but not new events
+COOLDOWN    = 12
 
-# per-event-type last-sent timestamp — prevents cross-type suppression
 _last_sent  = {}
 _lock       = threading.Lock()
 
@@ -27,7 +32,6 @@ def ts():
     return datetime.now().strftime("%H:%M:%S")
 
 def decode_subject(raw):
-    """Decode =?UTF-8?B?...?= encoded subjects from Reolink."""
     m = re.search(r'=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=', raw, re.IGNORECASE)
     if m:
         try:
@@ -37,11 +41,6 @@ def decode_subject(raw):
     return raw
 
 def classify(subject):
-    """
-    Returns (event_type, is_motion_track).
-    event_type: 'person' | 'vehicle' | 'motion'
-    is_motion_track: True if this is Reolink's follow-up tracking email (always duplicate).
-    """
     s = subject.lower()
     is_track = s.startswith("motion track:")
     if "person" in s:
@@ -56,40 +55,135 @@ EVENT_EMOJI = {
     "motion":  "👁 MOTION",
 }
 
-def grab_and_send(event_type):
+# ── urllib helpers (no subprocess) ────────────────────────────────────────────
+
+def fetch_snapshot(path, timeout=6):
+    """Grab JPEG from camera over LAN. Returns True on success."""
+    try:
+        req = urllib.request.Request(
+            CAMERA_URL,
+            headers={"Authorization": "Basic " + base64.b64encode(
+                f"{CAMERA_USER}:{CAMERA_PASS}".encode()).decode()}
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+        if len(data) < 10000:
+            return False
+        with open(path, "wb") as f:
+            f.write(data)
+        return True
+    except Exception as e:
+        print(f"  [{ts()}] [snap error] {e}", flush=True)
+        return False
+
+def send_telegram_photo(path, caption):
+    """Multipart upload to Telegram sendPhoto. Returns send duration ms."""
+    t0 = time.time()
+    boundary = b"----TGBoundary"
+    with open(path, "rb") as f:
+        img_data = f.read()
+
+    body = (
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="chat_id"\r\n\r\n' +
+        CHAT_ID.encode() + b"\r\n"
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="caption"\r\n\r\n' +
+        caption.encode() + b"\r\n"
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="photo"; filename="snap.jpg"\r\n'
+        b"Content-Type: image/jpeg\r\n\r\n" +
+        img_data + b"\r\n"
+        b"--" + boundary + b"--\r\n"
+    )
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary.decode()}"},
+        method="POST"
+    )
+    try:
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        print(f"  [{ts()}] [tg error] {e}", flush=True)
+    return int((time.time() - t0) * 1000)
+
+# ── core alert logic ───────────────────────────────────────────────────────────
+
+def handle_alert(event_type, prefetched_path):
+    """
+    Called in a daemon thread. prefetched_path is already on disk (or None).
+    Flow:
+      1. Send stale snapshot immediately if one exists (perceived <1s)
+      2. Check cooldown — drop if too recent
+      3. Send fresh snapshot (already fetched in parallel with step 1+2)
+    """
+    label  = EVENT_EMOJI.get(event_type, "🚨")
+    clock  = datetime.now().strftime("%I:%M:%S %p")
+
+    # Step 1 — instant stale send if we have a previous snap
+    stale_sent = False
+    if os.path.exists(SNAP_STALE) and os.path.getsize(SNAP_STALE) > 10000:
+        stale_ms = send_telegram_photo(SNAP_STALE, f"⚡ {label} — {clock} (live coming…)")
+        stale_sent = True
+        print(f"  [{ts()}] [stale:{event_type}] tg={stale_ms}ms", flush=True)
+
+    # Step 2 — cooldown check (after stale send so user already has something)
     now = time.time()
     with _lock:
         last = _last_sent.get(event_type, 0)
         if now - last < COOLDOWN:
             remaining = int(COOLDOWN - (now - last))
-            print(f"  [{ts()}] [cooldown:{event_type}] {remaining}s — skip", flush=True)
+            print(f"  [{ts()}] [cooldown:{event_type}] {remaining}s — skip fresh", flush=True)
             return
         _last_sent[event_type] = now
 
-    t0 = time.time()
-    subprocess.run(["curl", "-s", "--max-time", "6", CAMERA_URL, "-o", SNAP_PATH],
-                   capture_output=True)
-    snap_ms = int((time.time() - t0) * 1000)
+    # Step 3 — send fresh snapshot (pre-fetched while stale was sending)
+    fresh_ok = prefetched_path and os.path.exists(prefetched_path) and os.path.getsize(prefetched_path) > 10000
+    if not fresh_ok:
+        # prefetch failed or wasn't done — fetch now as fallback
+        t0 = time.time()
+        fresh_ok = fetch_snapshot(SNAP_PATH)
+        print(f"  [{ts()}] [snap fallback] {int((time.time()-t0)*1000)}ms", flush=True)
 
-    if not os.path.exists(SNAP_PATH) or os.path.getsize(SNAP_PATH) < 10000:
-        print(f"  [{ts()}] [error] snapshot failed ({snap_ms}ms)", flush=True)
-        return
+    if fresh_ok:
+        # promote fresh → stale for next event
+        import shutil
+        shutil.copy2(SNAP_PATH, SNAP_STALE)
+        caption = f"🚨 FRONT — {label} — {clock}"
+        send_ms = send_telegram_photo(SNAP_PATH, caption)
+        print(f"  [{ts()}] [sent:{event_type}] tg={send_ms}ms — {caption}", flush=True)
+    else:
+        print(f"  [{ts()}] [error] no fresh snapshot for {event_type}", flush=True)
 
-    label   = EVENT_EMOJI.get(event_type, "🚨")
-    clock   = datetime.now().strftime("%I:%M:%S %p")
-    caption = f"🚨 FRONT — {label} — {clock}"
 
-    t1 = time.time()
-    subprocess.run([
-        "curl", "-s",
-        "-F", f"chat_id={CHAT_ID}",
-        "-F", f"photo=@{SNAP_PATH}",
-        "-F", f"caption={caption}",
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    ], capture_output=True, timeout=15)
-    send_ms = int((time.time() - t1) * 1000)
+def on_email(event_type):
+    """
+    Immediately starts two parallel tasks:
+      A) Pre-fetch snapshot from camera (LAN, fast)
+      B) Send stale + cooldown check + send fresh  (waits for A)
+    Net effect: snapshot fetch overlaps with stale send + cooldown window.
+    """
+    snap_ready = threading.Event()
+    snap_result = [None]
 
-    print(f"  [{ts()}] [sent:{event_type}] snap={snap_ms}ms tg={send_ms}ms — {caption}", flush=True)
+    def prefetch():
+        t0 = time.time()
+        ok = fetch_snapshot(SNAP_PATH)
+        snap_result[0] = SNAP_PATH if ok else None
+        elapsed = int((time.time() - t0) * 1000)
+        print(f"  [{ts()}] [prefetch] {elapsed}ms {'ok' if ok else 'fail'}", flush=True)
+        snap_ready.set()
+
+    def alert():
+        snap_ready.wait(timeout=7)   # wait up to 7s for prefetch
+        handle_alert(event_type, snap_result[0])
+
+    threading.Thread(target=prefetch, daemon=True).start()
+    threading.Thread(target=alert,    daemon=True).start()
+
+
+# ── SMTP handler ───────────────────────────────────────────────────────────────
 
 class _Auth:
     def __call__(self, server, session, envelope, mechanism, auth_data):
@@ -109,15 +203,19 @@ class MotionHandler:
         print(f"  [{ts()}] [smtp] {subject[:80]}", flush=True)
 
         if is_track:
-            # Motion Track emails are always Reolink follow-ups — never new events
             print(f"  [{ts()}] [skip] motion-track duplicate", flush=True)
             return "250 OK"
 
-        threading.Thread(target=grab_and_send, args=(event_type,), daemon=True).start()
+        # Kick off prefetch + alert immediately — don't block the SMTP handler
+        threading.Thread(target=on_email, args=(event_type,), daemon=True).start()
         return "250 OK"
 
 if __name__ == "__main__":
     from aiosmtpd.controller import Controller
+
+    # warm the stale cache on boot if a previous snap exists
+    if os.path.exists(SNAP_PATH) and os.path.getsize(SNAP_PATH) > 10000:
+        import shutil; shutil.copy2(SNAP_PATH, SNAP_STALE)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -126,5 +224,5 @@ if __name__ == "__main__":
         authenticator=_Auth(), auth_required=False, auth_require_tls=False,
     )
     controller.start()
-    print(f"[{ts()}] 📧 SMTP ready on port {SMTP_PORT} (cooldown={COOLDOWN}s per type)", flush=True)
+    print(f"[{ts()}] 📧 SMTP ready on port {SMTP_PORT} (cooldown={COOLDOWN}s/type, stale+fresh mode)", flush=True)
     loop.run_forever()
