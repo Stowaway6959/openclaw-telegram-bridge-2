@@ -115,10 +115,6 @@ class MotionHandler:
         subject = str(msg.get("subject", ""))
         print(f"Email received: {subject}", flush=True)
 
-        if subject.startswith("Motion Track:"):
-            print("Motion Track — skipping", flush=True)
-            return "250 OK"
-
         email_img = None
         for part in msg.walk():
             if part.get_content_type() in ("image/jpeg", "image/jpg", "image/png"):
