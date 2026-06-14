@@ -13,9 +13,11 @@ CAMERA_USER     = os.environ.get("CAMERA_USER", "admin")
 CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
-COOLDOWN        = 60
+COOLDOWN        = 20
+MIN_SNAP_BYTES  = 500_000   # real RTSP frame is 1.5-3MB; anything smaller = stale/failed
 last_alert      = [0]
 RTSP_URL        = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_main"
+FFMPEG          = "/opt/homebrew/bin/ffmpeg"
 
 def grab_and_send():
     now = time.time()
@@ -23,36 +25,55 @@ def grab_and_send():
         print("Cooldown — skipping", flush=True)
         return
     last_alert[0] = now
+
     img = "/tmp/smtp_snap.jpg"
 
-    # RTSP frame grab — bypasses snapshot API which returns degraded frames during motion
-    r = subprocess.run([
-        "/opt/homebrew/bin/ffmpeg", "-rtsp_transport", "tcp",
-        "-i", RTSP_URL,
-        "-vframes", "1", "-q:v", "3",
-        "-update", "1", img, "-y"
-    ], capture_output=True, timeout=15)
+    # Remove stale file so a failed ffmpeg can't send an old frame
+    try:
+        os.remove(img)
+    except FileNotFoundError:
+        pass
 
-    label = "🚨 OUT FRONT 🚨"
+    try:
+        subprocess.run([
+            FFMPEG, "-rtsp_transport", "tcp",
+            "-i", RTSP_URL,
+            "-vframes", "1", "-q:v", "3",
+            "-update", "1", img, "-y"
+        ], capture_output=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        print("ffmpeg timed out", flush=True)
+        return
+    except Exception as e:
+        print(f"ffmpeg error: {e}", flush=True)
+        return
+
     sz = os.path.getsize(img) if os.path.exists(img) else 0
     print(f"Snap: {sz//1024}KB", flush=True)
 
-    if sz > 10000:
-        try:
-            subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
-                            "-F", f"caption={label}",
-                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
-                           capture_output=True, timeout=30)
-            print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
-        except subprocess.TimeoutExpired:
-            print(f"Telegram upload timed out", flush=True)
-    else:
-        print(f"Snap failed ({sz}B) at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+    if sz < MIN_SNAP_BYTES:
+        print(f"Snap too small ({sz//1024}KB) — skipping", flush=True)
+        return
+
+    label = "🚨 OUT FRONT 🚨"
+    try:
+        subprocess.run([
+            "curl", "-s",
+            "-F", f"chat_id={CHAT_ID}",
+            "-F", f"photo=@{img}",
+            "-F", f"caption={label}",
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        ], capture_output=True, timeout=30)
+        print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+    except subprocess.TimeoutExpired:
+        print("Telegram upload timed out", flush=True)
+
 
 class Authenticator:
     def __call__(self, server, session, envelope, mechanism, auth_data):
         from aiosmtpd.smtp import AuthResult
         return AuthResult(success=True)
+
 
 class MotionHandler:
     async def handle_DATA(self, server, session, envelope):
@@ -65,7 +86,8 @@ class MotionHandler:
         threading.Thread(target=grab_and_send, daemon=True).start()
         return "250 OK"
 
-print(f"📧 SMTP listener on port {SMTP_PORT}", flush=True)
+
+print(f"📧 SMTP ready on port {SMTP_PORT}", flush=True)
 controller = Controller(MotionHandler(), hostname="0.0.0.0", port=SMTP_PORT,
                         authenticator=Authenticator(), auth_required=False,
                         auth_require_tls=False)
