@@ -13,7 +13,7 @@ CAMERA_USER     = os.environ.get("CAMERA_USER", "admin")
 CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
-COOLDOWN        = 60
+COOLDOWN        = 20
 last_alert      = [0]
 
 def grab_and_send():
