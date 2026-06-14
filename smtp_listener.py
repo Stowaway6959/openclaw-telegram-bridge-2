@@ -24,19 +24,26 @@ def grab_and_send():
     last_alert[0] = now
     img     = "/tmp/smtp_snap.jpg"
     cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
-    time.sleep(20)  # wait for 15s recording to finish
-    subprocess.run(["curl", "-s", "--max-time", "25", cam_url, "-o", img], capture_output=True)
+    # Wait for recording to finish, retry until we get a full clean snap
+    time.sleep(20)
+    sz = 0
+    for attempt in range(4):
+        subprocess.run(["curl", "-s", "--max-time", "25", cam_url, "-o", img], capture_output=True)
+        sz = os.path.getsize(img) if os.path.exists(img) else 0
+        print(f"Snap attempt {attempt+1}: {sz//1024}KB", flush=True)
+        if sz > 500_000:
+            break
+        time.sleep(10)
+
     label = "🚨 OUT FRONT 🚨"
-    sz = os.path.getsize(img) if os.path.exists(img) else 0
-    print(f"Snap: {sz//1024}KB", flush=True)
-    if sz > 100_000:  # 100KB minimum; filters junk but allows partial snaps
+    if sz > 100_000:
         subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
                         "-F", f"caption={label}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
-                       capture_output=True, timeout=30)
-        print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+                       capture_output=True, timeout=60)
+        print(f"{label} sent {sz//1024}KB at {datetime.now().strftime('%H:%M:%S')}", flush=True)
     else:
-        print(f"Snap too small — skipping grey", flush=True)
+        print(f"Snap too small ({sz//1024}KB) — skipping", flush=True)
 
 class Authenticator:
     def __call__(self, server, session, envelope, mechanism, auth_data):
