@@ -27,10 +27,21 @@ def grab_and_send():
     img_out = "/tmp/smtp_snap_sm.jpg"
     cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
 
-    subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
+    # Camera returns degraded ~40-67KB frames when busy processing motion.
+    # Wait 2s then retry until we get a full-quality frame (>500KB).
+    time.sleep(2)
+    good = False
+    for attempt in range(5):
+        subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
+        sz = os.path.getsize(img) if os.path.exists(img) else 0
+        print(f"Snap attempt {attempt+1}: {sz//1024}KB", flush=True)
+        if sz >= 500000:
+            good = True
+            break
+        time.sleep(1)
 
-    if not os.path.exists(img) or os.path.getsize(img) < 10000:
-        print(f"Snap failed at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+    if not good:
+        print(f"Snap degraded after 5 attempts — skipping", flush=True)
         return
 
     # Resize to 1280px wide — cuts upload from 2.6MB to ~150KB, prevents timeout
@@ -38,7 +49,7 @@ def grab_and_send():
         ["sips", "-Z", "1280", img, "--out", img_out],
         capture_output=True
     )
-    send_img = img_out if r.returncode == 0 and os.path.exists(img_out) else img
+    send_img = img_out if r.returncode == 0 and os.path.exists(img_out) and os.path.getsize(img_out) > 10000 else img
 
     label = "🚨 OUT FRONT 🚨"
     try:
