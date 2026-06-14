@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local SMTP server — receives Reolink motion emails and sends Telegram alerts."""
-import asyncio, os, time, subprocess
+import asyncio, os, time, subprocess, threading
 from datetime import datetime
 from dotenv import load_dotenv
 from aiosmtpd.controller import Controller
@@ -24,16 +24,19 @@ def grab_and_send():
     last_alert[0] = now
     img     = "/tmp/smtp_snap.jpg"
     cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
+    time.sleep(20)  # wait for 15s recording to finish
     subprocess.run(["curl", "-s", "--max-time", "25", cam_url, "-o", img], capture_output=True)
     label = "🚨 OUT FRONT 🚨"
     sz = os.path.getsize(img) if os.path.exists(img) else 0
     print(f"Snap: {sz//1024}KB", flush=True)
-    if sz > 10000:
+    if sz > 500_000:  # full image is 2.7MB; skip truncated grey ones
         subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
                         "-F", f"caption={label}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
-                       capture_output=True, timeout=15)
-    print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+                       capture_output=True, timeout=30)
+        print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+    else:
+        print(f"Snap too small — skipping grey", flush=True)
 
 class Authenticator:
     def __call__(self, server, session, envelope, mechanism, auth_data):
@@ -48,7 +51,7 @@ class MotionHandler:
                 subject = line[8:].strip()
                 break
         print(f"Email received: {subject}", flush=True)
-        grab_and_send()
+        threading.Thread(target=grab_and_send, daemon=True).start()
         return "250 OK"
 
 print(f"📧 SMTP listener on port {SMTP_PORT}", flush=True)
