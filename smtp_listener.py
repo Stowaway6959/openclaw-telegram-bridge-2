@@ -14,9 +14,10 @@ CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
 COOLDOWN        = 20
-MIN_SNAP_BYTES  = 500_000   # real RTSP frame is 1.5-3MB; anything smaller = stale/failed
+MIN_SNAP_BYTES  = 10_000    # sub-stream is ~212KB, main is 2MB+; both valid above 10KB
 last_alert      = [0]
-RTSP_URL        = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_main"
+RTSP_MAIN       = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_main"
+RTSP_SUB        = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_sub"
 FFMPEG          = "/opt/homebrew/bin/ffmpeg"
 
 def grab_and_send():
@@ -28,48 +29,32 @@ def grab_and_send():
 
     img = "/tmp/smtp_snap.jpg"
 
-    # 1. Try RTSP (best quality, but camera may be busy during motion)
-    try:
-        os.remove(img)
-    except FileNotFoundError:
-        pass
-    try:
-        subprocess.run([
-            FFMPEG, "-rtsp_transport", "tcp",
-            "-i", RTSP_URL,
-            "-vframes", "1", "-q:v", "3",
-            "-update", "1", img, "-y"
-        ], capture_output=True, timeout=12)
-    except Exception:
-        pass
-    sz = os.path.getsize(img) if os.path.exists(img) else 0
-    print(f"RTSP snap: {sz//1024}KB", flush=True)
-
-    # 2. RTSP failed — fall back to HTTP snap + resize
-    #    Raw HTTP snap is 40-180KB at 7680x2160 (too compressed, shows grey).
-    #    Resize to 1280px wide via ffmpeg: downsampling 6x averages out artifacts
-    #    and produces a clean displayable image even from a degraded source.
-    if sz < MIN_SNAP_BYTES:
-        cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
-        http_img = "/tmp/smtp_http.jpg"
-        subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", http_img], capture_output=True)
-        http_sz = os.path.getsize(http_img) if os.path.exists(http_img) else 0
-        print(f"HTTP snap: {http_sz//1024}KB", flush=True)
-        if http_sz > 10000:
-            try:
-                os.remove(img)
-            except FileNotFoundError:
-                pass
+    def rtsp_grab(url, label):
+        try:
+            os.remove(img)
+        except FileNotFoundError:
+            pass
+        try:
             subprocess.run([
-                FFMPEG, "-i", http_img,
-                "-vf", "scale=1280:-2",
-                "-q:v", "4", img, "-y"
-            ], capture_output=True, timeout=10)
-            sz = os.path.getsize(img) if os.path.exists(img) else 0
-            print(f"Resized: {sz//1024}KB", flush=True)
+                FFMPEG, "-rtsp_transport", "tcp",
+                "-i", url, "-vframes", "1", "-q:v", "3",
+                "-update", "1", img, "-y"
+            ], capture_output=True, timeout=12)
+        except Exception:
+            pass
+        sz = os.path.getsize(img) if os.path.exists(img) else 0
+        print(f"{label}: {sz//1024}KB", flush=True)
+        return sz
+
+    # 1. Sub-stream first — low-res (1536x432) but camera can serve it during motion
+    sz = rtsp_grab(RTSP_SUB, "Sub-stream")
+
+    # 2. Sub-stream failed — try main stream (higher quality, works when camera not busy)
+    if sz < 10000:
+        sz = rtsp_grab(RTSP_MAIN, "Main-stream")
 
     if sz < 10000:
-        print(f"All methods failed — skipping", flush=True)
+        print("All methods failed — skipping", flush=True)
         return
 
     label = "🚨 OUT FRONT 🚨"
