@@ -11,15 +11,9 @@ load_dotenv()
 
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID         = os.environ["TELEGRAM_CHAT_ID"]
-CAMERA_USER     = os.environ.get("CAMERA_USER", "admin")
-CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
-CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
-SMTP_PORT       = 2525
-COOLDOWN        = 20
-last_alert      = [0]
-RTSP_MAIN       = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_main"
-RTSP_SUB        = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_sub"
-FFMPEG          = "/opt/homebrew/bin/ffmpeg"
+SMTP_PORT = 2525
+COOLDOWN  = 20
+last_alert = [0]
 
 
 def is_complete_jpeg(data: bytes) -> bool:
@@ -34,63 +28,8 @@ def grab_and_send(email_img: Optional[bytes] = None):
     last_alert[0] = now
 
     img = "/tmp/smtp_snap.jpg"
-    img_data = None
-
-    # --- Path 1: image came in the email itself (fastest, no camera hit needed) ---
-    if email_img and is_complete_jpeg(email_img):
-        img_data = email_img
-        print(f"Email attachment: {len(img_data)//1024}KB ✓", flush=True)
-
-    # --- Path 2: HTTP snap from camera ---
-    if img_data is None:
-        cam_url = (f"http://{CAMERA_IP}/cgi-bin/api.cgi"
-                   f"?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
-        subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
-                       capture_output=True)
-        if os.path.exists(img):
-            raw = open(img, "rb").read()
-            if is_complete_jpeg(raw):
-                img_data = raw
-                print(f"HTTP snap: {len(raw)//1024}KB ✓", flush=True)
-            else:
-                print(f"HTTP snap: {len(raw)//1024}KB ✗ (truncated)", flush=True)
-
-    # --- Path 3: RTSP grab (camera finished recording) ---
-    if img_data is None:
-        def rtsp_grab(url, label):
-            try:
-                os.remove(img)
-            except FileNotFoundError:
-                pass
-            try:
-                subprocess.run([
-                    FFMPEG, "-rtsp_transport", "tcp",
-                    "-i", url, "-vframes", "1", "-q:v", "3",
-                    "-update", "1", img, "-y"
-                ], capture_output=True, timeout=12)
-            except Exception:
-                pass
-            if os.path.exists(img):
-                raw = open(img, "rb").read()
-                ok = is_complete_jpeg(raw)
-                print(f"{label}: {len(raw)//1024}KB {'✓' if ok else '✗'}", flush=True)
-                return raw if ok else None
-            print(f"{label}: 0KB ✗", flush=True)
-            return None
-
-        print("HTTP truncated — trying RTSP...", flush=True)
-        for attempt in range(6):
-            time.sleep(5)
-            img_data = rtsp_grab(RTSP_SUB, f"Sub t+{5+attempt*5}s")
-            if img_data:
-                break
-            img_data = rtsp_grab(RTSP_MAIN, f"Main t+{5+attempt*5}s")
-            if img_data:
-                break
-
-    if img_data is None:
-        print("All paths failed — skipping", flush=True)
-        return
+    img_data = email_img
+    print(f"Email attachment: {len(img_data)//1024}KB ✓", flush=True)
 
     with open(img, "wb") as f:
         f.write(img_data)
@@ -140,6 +79,10 @@ class MotionHandler:
                     email_img = data
                     print(f"Attachment found: {len(data)//1024}KB", flush=True)
                     break
+
+        if email_img is None:
+            print("No attachment — skipping", flush=True)
+            return "250 OK"
 
         threading.Thread(target=grab_and_send, args=(email_img,), daemon=True).start()
         return "250 OK"
