@@ -59,30 +59,23 @@ def grab_and_send():
         print(f"{label}: {sz//1024}KB {'✓' if ok else '✗'}", flush=True)
         return sz if ok else 0
 
-    # 1. Sub-stream RTSP (1536x432, fast 20ms, works when camera not fully saturated)
-    sz = rtsp_grab(RTSP_SUB, "Sub-stream")
-
-    # 2. Main-stream RTSP fallback
-    if sz < 10000:
-        sz = rtsp_grab(RTSP_MAIN, "Main-stream")
-
-    # 3. HTTP snap with retries — camera sends truncated JPEGs during heavy motion
-    #    but usually completes within 1-3 seconds. Retry until FF D9 end marker present.
-    if sz < 10000:
-        for attempt in range(6):
-            subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
-                           capture_output=True)
-            sz = os.path.getsize(img) if os.path.exists(img) else 0
-            complete = is_complete_jpeg(img) if sz > 10000 else False
-            print(f"HTTP attempt {attempt+1}: {sz//1024}KB {'✓' if complete else '✗'}", flush=True)
-            if complete:
+    # Camera cannot serve RTSP or complete HTTP snap while actively recording HEVC.
+    # Poll sub-stream RTSP every 5s for up to 40s until recording ends.
+    sz = 0
+    for attempt in range(8):
+        wait = 3 if attempt == 0 else 5
+        time.sleep(wait)
+        sz = rtsp_grab(RTSP_SUB, f"Sub-stream t+{3 + attempt*5}s")
+        if sz > 10000:
+            break
+        # Also try main stream on even attempts
+        if attempt % 2 == 1:
+            sz = rtsp_grab(RTSP_MAIN, f"Main-stream t+{3 + attempt*5}s")
+            if sz > 10000:
                 break
-            time.sleep(1)
-        else:
-            sz = 0
 
     if sz < 10000:
-        print("All methods failed — skipping", flush=True)
+        print("Camera busy entire window — skipping", flush=True)
         return
 
     label = "🚨 OUT FRONT 🚨"
