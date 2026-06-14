@@ -29,7 +29,7 @@ def grab_and_send():
     label = "🚨 OUT FRONT 🚨"
     sz = os.path.getsize(img) if os.path.exists(img) else 0
     print(f"Snap: {sz//1024}KB", flush=True)
-    if sz > 500_000:  # full image is 2.7MB; skip truncated grey ones
+    if sz > 100_000:  # 100KB minimum; filters junk but allows partial snaps
         subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
                         "-F", f"caption={label}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
