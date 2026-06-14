@@ -63,12 +63,10 @@ def send_alert(email_img: Optional[bytes]):
         return
     last_alert[0] = now
 
-    # Priority 1: email attachment (vehicle detections always have one)
     if email_img and is_complete_jpeg(email_img):
         img_data = email_img
         src = "email"
     else:
-        # Priority 2: cached RTSP frame (captured seconds before motion)
         with frame_lock:
             img_data = latest_frame[0]
         src = "cache"
@@ -116,6 +114,10 @@ class MotionHandler:
         msg = email_lib.message_from_bytes(envelope.content, policy=email_policy.default)
         subject = str(msg.get("subject", ""))
         print(f"Email received: {subject}", flush=True)
+
+        if subject.startswith("Motion Track:"):
+            print("Motion Track — skipping", flush=True)
+            return "250 OK"
 
         email_img = None
         for part in msg.walk():
