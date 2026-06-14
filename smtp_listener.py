@@ -59,12 +59,12 @@ def grab_and_send(email_img: Optional[bytes] = None):
     with open(img, "wb") as f:
         f.write(img_data)
 
-    # Resize to 1920px wide — drops 2.7MB panoramic to ~200KB for fast upload
+    # Resize to 1280px wide — panoramic becomes ~150KB for fast upload
     img_send = "/tmp/smtp_snap_small.jpg"
-    subprocess.run(["sips", "--resampleWidth", "1920", img, "--out", img_send],
+    subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_send],
                    capture_output=True)
     if not os.path.exists(img_send) or os.path.getsize(img_send) < 5000:
-        img_send = img  # fall back to original if resize fails
+        img_send = img
 
     label = "🚨 OUT FRONT 🚨"
     try:
@@ -74,7 +74,7 @@ def grab_and_send(email_img: Optional[bytes] = None):
             "-F", f"photo=@{img_send}",
             "-F", f"caption={label}",
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        ], capture_output=True, timeout=30)
+        ], capture_output=True, timeout=60)
         sz_send = os.path.getsize(img_send)
         print(f"{label} sent {sz_send//1024}KB at {datetime.now().strftime('%H:%M:%S')}",
               flush=True)
