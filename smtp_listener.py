@@ -15,6 +15,7 @@ CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
 COOLDOWN        = 60
 last_alert      = [0]
+RTSP_URL        = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_main"
 
 def grab_and_send():
     now = time.time()
@@ -22,19 +23,31 @@ def grab_and_send():
         print("Cooldown — skipping", flush=True)
         return
     last_alert[0] = now
-    img     = "/tmp/smtp_snap.jpg"
-    cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
-    subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
+    img = "/tmp/smtp_snap.jpg"
+
+    # RTSP frame grab — bypasses snapshot API which returns degraded frames during motion
+    r = subprocess.run([
+        "ffmpeg", "-rtsp_transport", "tcp",
+        "-i", RTSP_URL,
+        "-vframes", "1", "-q:v", "3",
+        "-update", "1", img, "-y"
+    ], capture_output=True, timeout=15)
+
     label = "🚨 OUT FRONT 🚨"
-    if os.path.exists(img) and os.path.getsize(img) > 10000:
+    sz = os.path.getsize(img) if os.path.exists(img) else 0
+    print(f"Snap: {sz//1024}KB", flush=True)
+
+    if sz > 10000:
         try:
             subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
                             "-F", f"caption={label}",
                             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
                            capture_output=True, timeout=30)
+            print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
         except subprocess.TimeoutExpired:
             print(f"Telegram upload timed out", flush=True)
-    print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+    else:
+        print(f"Snap failed ({sz}B) at {datetime.now().strftime('%H:%M:%S')}", flush=True)
 
 class Authenticator:
     def __call__(self, server, session, envelope, mechanism, auth_data):
