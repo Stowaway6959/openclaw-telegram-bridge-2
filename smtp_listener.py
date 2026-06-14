@@ -24,9 +24,11 @@ def grab_and_send():
     last_alert[0] = now
     img     = "/tmp/smtp_snap.jpg"
     cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
-    subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
+    subprocess.run(["curl", "-s", "--max-time", "25", cam_url, "-o", img], capture_output=True)
     label = "🚨 OUT FRONT 🚨"
-    if os.path.exists(img) and os.path.getsize(img) > 10000:
+    sz = os.path.getsize(img) if os.path.exists(img) else 0
+    print(f"Snap: {sz//1024}KB", flush=True)
+    if sz > 10000:
         subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
                         "-F", f"caption={label}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
