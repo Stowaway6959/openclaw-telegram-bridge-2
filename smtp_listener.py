@@ -26,12 +26,21 @@ def grab_and_send():
     cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
     subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
     label = "🚨 OUT FRONT 🚨"
-    if os.path.exists(img) and os.path.getsize(img) > 10000:
+    # Validate JPEG magic bytes — camera error responses are >10KB but not images
+    def is_jpeg(path):
+        try:
+            with open(path, "rb") as f:
+                return f.read(3) == b"\xff\xd8\xff"
+        except Exception:
+            return False
+    if os.path.exists(img) and os.path.getsize(img) > 10000 and is_jpeg(img):
         subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
                         "-F", f"caption={label}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
                        capture_output=True, timeout=15)
-    print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+        print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+    else:
+        print(f"Snap invalid — skipped at {datetime.now().strftime('%H:%M:%S')}", flush=True)
 
 class Authenticator:
     def __call__(self, server, session, envelope, mechanism, auth_data):
