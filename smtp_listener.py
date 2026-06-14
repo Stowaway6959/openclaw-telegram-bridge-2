@@ -28,9 +28,16 @@ def grab_and_send():
     cam_url = (f"http://{CAMERA_IP}/cgi-bin/api.cgi"
                f"?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
 
-    time.sleep(12)  # wait for 15s recording to finish before snapping
-    subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
-                   capture_output=True)
+    # Wait for 15s recording to finish, then retry until we get a full snap
+    time.sleep(12)
+    for attempt in range(4):
+        subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
+                       capture_output=True)
+        sz = os.path.getsize(img) if os.path.exists(img) else 0
+        print(f"Snap attempt {attempt+1}: {sz//1024}KB", flush=True)
+        if sz > 500_000:  # full image is 2.7MB; truncated is <200KB
+            break
+        time.sleep(5)  # still recording — wait and retry
 
     if os.path.exists(img) and os.path.getsize(img) > 10_000:
         label = "🚨 OUT FRONT 🚨"
