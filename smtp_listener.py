@@ -29,6 +29,18 @@ def grab_and_send():
 
     img = "/tmp/smtp_snap.jpg"
 
+    cam_url = (f"http://{CAMERA_IP}/cgi-bin/api.cgi"
+               f"?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
+
+    def is_complete_jpeg(path):
+        """A truncated JPEG is missing the FF D9 end marker — shows grey in Telegram."""
+        try:
+            with open(path, "rb") as f:
+                f.seek(-2, 2)
+                return f.read(2) == b"\xff\xd9"
+        except Exception:
+            return False
+
     def rtsp_grab(url, label):
         try:
             os.remove(img)
@@ -43,15 +55,31 @@ def grab_and_send():
         except Exception:
             pass
         sz = os.path.getsize(img) if os.path.exists(img) else 0
-        print(f"{label}: {sz//1024}KB", flush=True)
-        return sz
+        ok = is_complete_jpeg(img) if sz > 0 else False
+        print(f"{label}: {sz//1024}KB {'✓' if ok else '✗'}", flush=True)
+        return sz if ok else 0
 
-    # 1. Sub-stream first — low-res (1536x432) but camera can serve it during motion
+    # 1. Sub-stream RTSP (1536x432, fast 20ms, works when camera not fully saturated)
     sz = rtsp_grab(RTSP_SUB, "Sub-stream")
 
-    # 2. Sub-stream failed — try main stream (higher quality, works when camera not busy)
+    # 2. Main-stream RTSP fallback
     if sz < 10000:
         sz = rtsp_grab(RTSP_MAIN, "Main-stream")
+
+    # 3. HTTP snap with retries — camera sends truncated JPEGs during heavy motion
+    #    but usually completes within 1-3 seconds. Retry until FF D9 end marker present.
+    if sz < 10000:
+        for attempt in range(6):
+            subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
+                           capture_output=True)
+            sz = os.path.getsize(img) if os.path.exists(img) else 0
+            complete = is_complete_jpeg(img) if sz > 10000 else False
+            print(f"HTTP attempt {attempt+1}: {sz//1024}KB {'✓' if complete else '✗'}", flush=True)
+            if complete:
+                break
+            time.sleep(1)
+        else:
+            sz = 0
 
     if sz < 10000:
         print("All methods failed — skipping", flush=True)
