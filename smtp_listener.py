@@ -37,11 +37,17 @@ def grab_and_send():
 
     label = "🚨 OUT FRONT 🚨"
     if sz > 100_000:
-        subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
+        # Resize to 1280px wide (~200KB) so upload is fast and reliable
+        img_out = "/tmp/smtp_snap_small.jpg"
+        subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_out],
+                       capture_output=True)
+        if not os.path.exists(img_out) or os.path.getsize(img_out) < 5000:
+            img_out = img
+        subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img_out}",
                         "-F", f"caption={label}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
-                       capture_output=True, timeout=60)
-        print(f"{label} sent {sz//1024}KB at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+                       capture_output=True, timeout=30)
+        print(f"{label} sent {os.path.getsize(img_out)//1024}KB at {datetime.now().strftime('%H:%M:%S')}", flush=True)
     else:
         print(f"Snap too small ({sz//1024}KB) — skipping", flush=True)
 
