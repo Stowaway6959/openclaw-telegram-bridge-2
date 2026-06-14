@@ -84,16 +84,21 @@ class MotionHandler:
         print(f"Email: {subject}", flush=True)
 
         # Extract JPEG attached by Reolink — this is the clean, full-quality image
+        best = None
         for part in msg.walk():
-            if part.get_content_type() in ("image/jpeg", "image/jpg", "image/png"):
-                data = part.get_payload(decode=True)
-                if data and len(data) > 500_000 and data[-2:] == b"\xff\xd9":
-                    print(f"Attachment: {len(data)//1024}KB ✓", flush=True)
-                    threading.Thread(target=send_alert, args=(data,), daemon=True).start()
-                    return "250 OK"
+            ct = part.get_content_type()
+            data = part.get_payload(decode=True) if part.get_payload(decode=True) else None
+            if data:
+                print(f"Part: {ct} {len(data)//1024}KB end={data[-2:].hex()}", flush=True)
+            if ct in ("image/jpeg", "image/jpg", "image/png") and data and len(data) > 10_000:
+                if best is None or len(data) > len(best):
+                    best = data
 
-        # No attachment — fall back to HTTP snap after recording ends
-        threading.Thread(target=snap_and_send, daemon=True).start()
+        if best and best[-2:] == b"\xff\xd9":
+            print(f"Attachment: {len(best)//1024}KB ✓", flush=True)
+            threading.Thread(target=send_alert, args=(best,), daemon=True).start()
+        else:
+            print("No clean attachment — skipping", flush=True)
         return "250 OK"
 
 
