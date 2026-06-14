@@ -22,39 +22,32 @@ def grab_and_send():
         print("Cooldown — skipping", flush=True)
         return
     last_alert[0] = now
-    img     = "/tmp/smtp_snap.jpg"
-    cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
-    # Wait for recording to finish, retry until we get a full clean snap
-    time.sleep(20)
-    sz = 0
-    for attempt in range(4):
-        subprocess.run(["curl", "-s", "--max-time", "25", cam_url, "-o", img], capture_output=True)
-        sz = os.path.getsize(img) if os.path.exists(img) else 0
-        print(f"Snap attempt {attempt+1}: {sz//1024}KB", flush=True)
-        if sz > 500_000:
-            break
-        time.sleep(10)
 
-    label = "🚨 OUT FRONT 🚨"
-    if sz > 100_000:
-        # Resize to 1280px wide (~200KB) so upload is fast and reliable
-        img_out = "/tmp/smtp_snap_small.jpg"
-        subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_out],
-                       capture_output=True)
-        if not os.path.exists(img_out) or os.path.getsize(img_out) < 5000:
-            img_out = img
-        subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img_out}",
+    img     = "/tmp/smtp_snap.jpg"
+    img_out = "/tmp/smtp_snap_small.jpg"
+    cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
+
+    subprocess.run(["curl", "-s", "--max-time", "15", cam_url, "-o", img], capture_output=True)
+
+    sz = os.path.getsize(img) if os.path.exists(img) else 0
+    print(f"Snap: {sz//1024}KB", flush=True)
+
+    if sz > 10_000:
+        subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_out], capture_output=True)
+        send = img_out if os.path.exists(img_out) and os.path.getsize(img_out) > 5000 else img
+        label = "🚨 OUT FRONT 🚨"
+        subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{send}",
                         "-F", f"caption={label}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
                        capture_output=True, timeout=30)
-        print(f"{label} sent {os.path.getsize(img_out)//1024}KB at {datetime.now().strftime('%H:%M:%S')}", flush=True)
-    else:
-        print(f"Snap too small ({sz//1024}KB) — skipping", flush=True)
+        print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+
 
 class Authenticator:
     def __call__(self, server, session, envelope, mechanism, auth_data):
         from aiosmtpd.smtp import AuthResult
         return AuthResult(success=True)
+
 
 class MotionHandler:
     async def handle_DATA(self, server, session, envelope):
@@ -66,6 +59,7 @@ class MotionHandler:
         print(f"Email received: {subject}", flush=True)
         threading.Thread(target=grab_and_send, daemon=True).start()
         return "250 OK"
+
 
 print(f"📧 SMTP listener on port {SMTP_PORT}", flush=True)
 controller = Controller(MotionHandler(), hostname="0.0.0.0", port=SMTP_PORT,
