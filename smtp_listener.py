@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Local SMTP server — receives Reolink motion emails and sends Telegram alerts."""
-import asyncio, os, time, subprocess, threading
+import asyncio, os, time, subprocess, threading, email as email_lib
+from email import policy as email_policy
+from typing import Optional
 from datetime import datetime
 from dotenv import load_dotenv
 from aiosmtpd.controller import Controller
@@ -14,13 +16,17 @@ CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
 COOLDOWN        = 20
-MIN_SNAP_BYTES  = 10_000    # sub-stream is ~212KB, main is 2MB+; both valid above 10KB
 last_alert      = [0]
 RTSP_MAIN       = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_main"
 RTSP_SUB        = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_sub"
 FFMPEG          = "/opt/homebrew/bin/ffmpeg"
 
-def grab_and_send():
+
+def is_complete_jpeg(data: bytes) -> bool:
+    return len(data) > 1000 and data[-2:] == b"\xff\xd9"
+
+
+def grab_and_send(email_img: Optional[bytes] = None):
     now = time.time()
     if now - last_alert[0] < COOLDOWN:
         print("Cooldown — skipping", flush=True)
@@ -28,63 +34,66 @@ def grab_and_send():
     last_alert[0] = now
 
     img = "/tmp/smtp_snap.jpg"
+    img_data = None
 
-    cam_url = (f"http://{CAMERA_IP}/cgi-bin/api.cgi"
-               f"?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
+    # --- Path 1: image came in the email itself (fastest, no camera hit needed) ---
+    if email_img and is_complete_jpeg(email_img):
+        img_data = email_img
+        print(f"Email attachment: {len(img_data)//1024}KB ✓", flush=True)
 
-    def is_complete_jpeg(path):
-        """A truncated JPEG is missing the FF D9 end marker — shows grey in Telegram."""
-        try:
-            with open(path, "rb") as f:
-                f.seek(-2, 2)
-                return f.read(2) == b"\xff\xd9"
-        except Exception:
-            return False
+    # --- Path 2: HTTP snap from camera ---
+    if img_data is None:
+        cam_url = (f"http://{CAMERA_IP}/cgi-bin/api.cgi"
+                   f"?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
+        subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
+                       capture_output=True)
+        if os.path.exists(img):
+            raw = open(img, "rb").read()
+            if is_complete_jpeg(raw):
+                img_data = raw
+                print(f"HTTP snap: {len(raw)//1024}KB ✓", flush=True)
+            else:
+                print(f"HTTP snap: {len(raw)//1024}KB ✗ (truncated)", flush=True)
 
-    def rtsp_grab(url, label):
-        try:
-            os.remove(img)
-        except FileNotFoundError:
-            pass
-        try:
-            subprocess.run([
-                FFMPEG, "-rtsp_transport", "tcp",
-                "-i", url, "-vframes", "1", "-q:v", "3",
-                "-update", "1", img, "-y"
-            ], capture_output=True, timeout=12)
-        except Exception:
-            pass
-        sz = os.path.getsize(img) if os.path.exists(img) else 0
-        ok = is_complete_jpeg(img) if sz > 0 else False
-        print(f"{label}: {sz//1024}KB {'✓' if ok else '✗'}", flush=True)
-        return sz if ok else 0
+    # --- Path 3: RTSP grab (camera finished recording) ---
+    if img_data is None:
+        def rtsp_grab(url, label):
+            try:
+                os.remove(img)
+            except FileNotFoundError:
+                pass
+            try:
+                subprocess.run([
+                    FFMPEG, "-rtsp_transport", "tcp",
+                    "-i", url, "-vframes", "1", "-q:v", "3",
+                    "-update", "1", img, "-y"
+                ], capture_output=True, timeout=12)
+            except Exception:
+                pass
+            if os.path.exists(img):
+                raw = open(img, "rb").read()
+                ok = is_complete_jpeg(raw)
+                print(f"{label}: {len(raw)//1024}KB {'✓' if ok else '✗'}", flush=True)
+                return raw if ok else None
+            print(f"{label}: 0KB ✗", flush=True)
+            return None
 
-    # Fast path: HTTP snap immediately — works if camera recording is short (≤10s)
-    subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
-    sz = os.path.getsize(img) if os.path.exists(img) else 0
-    complete = is_complete_jpeg(img) if sz > 10000 else False
-    print(f"HTTP snap: {sz//1024}KB {'✓' if complete else '✗'}", flush=True)
-
-    if complete:
-        # Fast: camera already finished recording, got a clean snap
-        pass
-    else:
-        # Slow path: camera still recording. Poll RTSP every 5s until done (up to 30s).
-        # Fix: shorten motion recording in Reolink app to 5-10s to avoid this path.
-        print("Truncated — waiting for recording to end...", flush=True)
-        sz = 0
+        print("HTTP truncated — trying RTSP...", flush=True)
         for attempt in range(6):
             time.sleep(5)
-            sz = rtsp_grab(RTSP_SUB, f"Sub-stream t+{5 + attempt*5}s")
-            if sz > 10000:
+            img_data = rtsp_grab(RTSP_SUB, f"Sub t+{5+attempt*5}s")
+            if img_data:
                 break
-            sz = rtsp_grab(RTSP_MAIN, f"Main-stream t+{5 + attempt*5}s")
-            if sz > 10000:
+            img_data = rtsp_grab(RTSP_MAIN, f"Main t+{5+attempt*5}s")
+            if img_data:
                 break
 
-        if sz < 10000:
-            print("Camera busy entire window — skipping", flush=True)
-            return
+    if img_data is None:
+        print("All paths failed — skipping", flush=True)
+        return
+
+    with open(img, "wb") as f:
+        f.write(img_data)
 
     label = "🚨 OUT FRONT 🚨"
     try:
@@ -108,13 +117,22 @@ class Authenticator:
 
 class MotionHandler:
     async def handle_DATA(self, server, session, envelope):
-        subject = ""
-        for line in envelope.content.decode("utf-8", errors="ignore").splitlines():
-            if line.lower().startswith("subject:"):
-                subject = line[8:].strip()
-                break
+        msg = email_lib.message_from_bytes(envelope.content, policy=email_policy.default)
+        subject = str(msg.get("subject", ""))
         print(f"Email received: {subject}", flush=True)
-        threading.Thread(target=grab_and_send, daemon=True).start()
+
+        # Extract JPEG attachment if Reolink included one
+        email_img = None
+        for part in msg.walk():
+            ct = part.get_content_type()
+            if ct in ("image/jpeg", "image/jpg", "image/png"):
+                data = part.get_payload(decode=True)
+                if data and len(data) > 5000:
+                    email_img = data
+                    print(f"Attachment found: {len(data)//1024}KB", flush=True)
+                    break
+
+        threading.Thread(target=grab_and_send, args=(email_img,), daemon=True).start()
         return "250 OK"
 
 
