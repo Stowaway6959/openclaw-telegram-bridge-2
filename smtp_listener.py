@@ -28,35 +28,48 @@ def grab_and_send():
 
     img = "/tmp/smtp_snap.jpg"
 
-    # Retry up to 4 times — camera RTSP server can be temporarily busy during motion
-    sz = 0
-    for attempt in range(4):
-        try:
-            os.remove(img)
-        except FileNotFoundError:
-            pass
-        try:
-            subprocess.run([
-                FFMPEG, "-rtsp_transport", "tcp",
-                "-i", RTSP_URL,
-                "-vframes", "1", "-q:v", "3",
-                "-update", "1", img, "-y"
-            ], capture_output=True, timeout=12)
-        except subprocess.TimeoutExpired:
-            print(f"ffmpeg timeout attempt {attempt+1}", flush=True)
-            time.sleep(2)
-            continue
-        except Exception as e:
-            print(f"ffmpeg error: {e}", flush=True)
-            return
-        sz = os.path.getsize(img) if os.path.exists(img) else 0
-        print(f"Snap attempt {attempt+1}: {sz//1024}KB", flush=True)
-        if sz >= MIN_SNAP_BYTES:
-            break
-        time.sleep(2)
+    # 1. Try RTSP (best quality, but camera may be busy during motion)
+    try:
+        os.remove(img)
+    except FileNotFoundError:
+        pass
+    try:
+        subprocess.run([
+            FFMPEG, "-rtsp_transport", "tcp",
+            "-i", RTSP_URL,
+            "-vframes", "1", "-q:v", "3",
+            "-update", "1", img, "-y"
+        ], capture_output=True, timeout=12)
+    except Exception:
+        pass
+    sz = os.path.getsize(img) if os.path.exists(img) else 0
+    print(f"RTSP snap: {sz//1024}KB", flush=True)
 
+    # 2. RTSP failed — fall back to HTTP snap + resize
+    #    Raw HTTP snap is 40-180KB at 7680x2160 (too compressed, shows grey).
+    #    Resize to 1280px wide via ffmpeg: downsampling 6x averages out artifacts
+    #    and produces a clean displayable image even from a degraded source.
     if sz < MIN_SNAP_BYTES:
-        print(f"All attempts failed — skipping", flush=True)
+        cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
+        http_img = "/tmp/smtp_http.jpg"
+        subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", http_img], capture_output=True)
+        http_sz = os.path.getsize(http_img) if os.path.exists(http_img) else 0
+        print(f"HTTP snap: {http_sz//1024}KB", flush=True)
+        if http_sz > 10000:
+            try:
+                os.remove(img)
+            except FileNotFoundError:
+                pass
+            subprocess.run([
+                FFMPEG, "-i", http_img,
+                "-vf", "scale=1280:-2",
+                "-q:v", "4", img, "-y"
+            ], capture_output=True, timeout=10)
+            sz = os.path.getsize(img) if os.path.exists(img) else 0
+            print(f"Resized: {sz//1024}KB", flush=True)
+
+    if sz < 10000:
+        print(f"All methods failed — skipping", flush=True)
         return
 
     label = "🚨 OUT FRONT 🚨"
