@@ -59,24 +59,32 @@ def grab_and_send():
         print(f"{label}: {sz//1024}KB {'✓' if ok else '✗'}", flush=True)
         return sz if ok else 0
 
-    # Camera cannot serve RTSP or complete HTTP snap while actively recording HEVC.
-    # Poll sub-stream RTSP every 5s for up to 40s until recording ends.
-    sz = 0
-    for attempt in range(8):
-        wait = 3 if attempt == 0 else 5
-        time.sleep(wait)
-        sz = rtsp_grab(RTSP_SUB, f"Sub-stream t+{3 + attempt*5}s")
-        if sz > 10000:
-            break
-        # Also try main stream on even attempts
-        if attempt % 2 == 1:
-            sz = rtsp_grab(RTSP_MAIN, f"Main-stream t+{3 + attempt*5}s")
+    # Fast path: HTTP snap immediately — works if camera recording is short (≤10s)
+    subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
+    sz = os.path.getsize(img) if os.path.exists(img) else 0
+    complete = is_complete_jpeg(img) if sz > 10000 else False
+    print(f"HTTP snap: {sz//1024}KB {'✓' if complete else '✗'}", flush=True)
+
+    if complete:
+        # Fast: camera already finished recording, got a clean snap
+        pass
+    else:
+        # Slow path: camera still recording. Poll RTSP every 5s until done (up to 30s).
+        # Fix: shorten motion recording in Reolink app to 5-10s to avoid this path.
+        print("Truncated — waiting for recording to end...", flush=True)
+        sz = 0
+        for attempt in range(6):
+            time.sleep(5)
+            sz = rtsp_grab(RTSP_SUB, f"Sub-stream t+{5 + attempt*5}s")
+            if sz > 10000:
+                break
+            sz = rtsp_grab(RTSP_MAIN, f"Main-stream t+{5 + attempt*5}s")
             if sz > 10000:
                 break
 
-    if sz < 10000:
-        print("Camera busy entire window — skipping", flush=True)
-        return
+        if sz < 10000:
+            print("Camera busy entire window — skipping", flush=True)
+            return
 
     label = "🚨 OUT FRONT 🚨"
     try:
