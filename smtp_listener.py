@@ -11,10 +11,27 @@ load_dotenv()
 
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID         = os.environ["TELEGRAM_CHAT_ID"]
+CAMERA_USER     = os.environ.get("CAMERA_USER", "admin")
+CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
+CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT = 2525
 COOLDOWN  = 30
 last_alert = [0]
 alert_lock = threading.Lock()
+
+
+def snap_and_send():
+    """Fallback: HTTP snap after waiting for recording to finish."""
+    time.sleep(16)
+    cam_url = (f"http://{CAMERA_IP}/cgi-bin/api.cgi"
+               f"?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
+    img = "/tmp/smtp_snap.jpg"
+    subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
+                   capture_output=True)
+    sz = os.path.getsize(img) if os.path.exists(img) else 0
+    print(f"HTTP snap: {sz//1024}KB", flush=True)
+    if sz > 10_000:
+        send_alert(open(img, "rb").read())
 
 
 def send_alert(img_data: bytes):
@@ -75,7 +92,8 @@ class MotionHandler:
                     threading.Thread(target=send_alert, args=(data,), daemon=True).start()
                     return "250 OK"
 
-        print("No clean attachment — skipping", flush=True)
+        # No attachment — fall back to HTTP snap after recording ends
+        threading.Thread(target=snap_and_send, daemon=True).start()
         return "250 OK"
 
 
