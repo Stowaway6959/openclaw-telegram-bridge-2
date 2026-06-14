@@ -13,7 +13,7 @@ CAMERA_USER     = os.environ.get("CAMERA_USER", "admin")
 CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
-COOLDOWN        = 60
+COOLDOWN        = 15
 last_alert      = [0]
 
 def grab_and_send():
@@ -29,10 +29,7 @@ def grab_and_send():
 
     subprocess.run(["curl", "-s", "--max-time", "15", cam_url, "-o", img], capture_output=True)
 
-    sz = os.path.getsize(img) if os.path.exists(img) else 0
-    print(f"Snap: {sz//1024}KB", flush=True)
-
-    if sz > 10_000:
+    if os.path.exists(img) and os.path.getsize(img) > 10_000:
         subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_out], capture_output=True)
         send = img_out if os.path.exists(img_out) and os.path.getsize(img_out) > 5000 else img
         label = "🚨 OUT FRONT 🚨"
