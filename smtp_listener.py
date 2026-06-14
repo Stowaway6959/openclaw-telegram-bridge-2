@@ -13,7 +13,7 @@ CAMERA_USER     = os.environ.get("CAMERA_USER", "admin")
 CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
-COOLDOWN        = 20
+COOLDOWN        = 60
 last_alert      = [0]
 
 def grab_and_send():
@@ -22,49 +22,19 @@ def grab_and_send():
         print("Cooldown — skipping", flush=True)
         return
     last_alert[0] = now
-
     img     = "/tmp/smtp_snap.jpg"
-    img_out = "/tmp/smtp_snap_sm.jpg"
     cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
-
-    # Camera returns degraded ~40-67KB frames when busy processing motion.
-    # Wait 2s then retry until we get a full-quality frame (>500KB).
-    time.sleep(2)
-    good = False
-    for attempt in range(5):
-        subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
-        sz = os.path.getsize(img) if os.path.exists(img) else 0
-        print(f"Snap attempt {attempt+1}: {sz//1024}KB", flush=True)
-        if sz >= 500000:
-            good = True
-            break
-        time.sleep(1)
-
-    if not good:
-        print(f"Snap degraded after 5 attempts — skipping", flush=True)
-        return
-
-    # Resize to 1280px wide — cuts upload from 2.6MB to ~150KB, prevents timeout
-    r = subprocess.run(
-        ["sips", "-Z", "1280", img, "--out", img_out],
-        capture_output=True
-    )
-    send_img = img_out if r.returncode == 0 and os.path.exists(img_out) and os.path.getsize(img_out) > 10000 else img
-
+    subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img], capture_output=True)
     label = "🚨 OUT FRONT 🚨"
-    try:
-        subprocess.run(
-            ["curl", "-s", "-F", f"chat_id={CHAT_ID}",
-             "-F", f"photo=@{send_img}",
-             "-F", f"caption={label}",
-             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
-            capture_output=True, timeout=20
-        )
-        print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
-    except subprocess.TimeoutExpired:
-        print(f"Telegram upload timed out at {datetime.now().strftime('%H:%M:%S')}", flush=True)
-    except Exception as e:
-        print(f"Send error: {e}", flush=True)
+    if os.path.exists(img) and os.path.getsize(img) > 10000:
+        try:
+            subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{img}",
+                            "-F", f"caption={label}",
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
+                           capture_output=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            print(f"Telegram upload timed out", flush=True)
+    print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
 
 class Authenticator:
     def __call__(self, server, session, envelope, mechanism, auth_data):
@@ -79,7 +49,6 @@ class MotionHandler:
                 subject = line[8:].strip()
                 break
         print(f"Email received: {subject}", flush=True)
-        # Run in thread so SMTP handler never blocks or crashes on timeout
         threading.Thread(target=grab_and_send, daemon=True).start()
         return "250 OK"
 
