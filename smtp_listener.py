@@ -27,7 +27,7 @@ def grab_and_send():
 
     # RTSP frame grab — bypasses snapshot API which returns degraded frames during motion
     r = subprocess.run([
-        "ffmpeg", "-rtsp_transport", "tcp",
+        "/opt/homebrew/bin/ffmpeg", "-rtsp_transport", "tcp",
         "-i", RTSP_URL,
         "-vframes", "1", "-q:v", "3",
         "-update", "1", img, "-y"
