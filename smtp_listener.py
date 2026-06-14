@@ -28,6 +28,7 @@ def grab_and_send():
     cam_url = (f"http://{CAMERA_IP}/cgi-bin/api.cgi"
                f"?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
 
+    time.sleep(12)  # wait for 15s recording to finish before snapping
     subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
                    capture_output=True)
 
