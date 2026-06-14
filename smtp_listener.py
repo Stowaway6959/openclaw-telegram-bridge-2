@@ -14,74 +14,97 @@ CHAT_ID         = os.environ["TELEGRAM_CHAT_ID"]
 CAMERA_USER     = os.environ.get("CAMERA_USER", "admin")
 CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
-SMTP_PORT = 2525
-COOLDOWN  = 20
-last_alert = [0]
+SMTP_PORT  = 2525
+COOLDOWN   = 20
+RTSP_SUB   = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{CAMERA_IP}:554/h264Preview_01_sub"
+FFMPEG     = "/opt/homebrew/bin/ffmpeg"
+
+last_alert   = [0]
+frame_lock   = threading.Lock()
+latest_frame = [None]   # bytes of last good RTSP frame
 
 
 def is_complete_jpeg(data: bytes) -> bool:
-    return len(data) > 1000 and data[-2:] == b"\xff\xd9"
+    return len(data) > 10_000 and data[-2:] == b"\xff\xd9"
 
 
-def grab_and_send(email_img: Optional[bytes] = None):
+# ── Background RTSP poller ──────────────────────────────────────────────────
+def rtsp_poller():
+    """Grab one frame from sub-stream every 8s and cache it."""
+    tmp = "/tmp/rtsp_cache.jpg"
+    while True:
+        try:
+            result = subprocess.run([
+                FFMPEG, "-rtsp_transport", "tcp", "-i", RTSP_SUB,
+                "-vframes", "1", "-q:v", "3", "-update", "1", tmp, "-y"
+            ], capture_output=True, timeout=5)
+            if os.path.exists(tmp):
+                raw = open(tmp, "rb").read()
+                ok = is_complete_jpeg(raw)
+                print(f"[cache] {len(raw)//1024}KB {'✓' if ok else '✗'} rc={result.returncode}", flush=True)
+                if ok:
+                    with frame_lock:
+                        latest_frame[0] = raw
+            else:
+                print(f"[cache] no file, rc={result.returncode}", flush=True)
+        except Exception:
+            pass
+        time.sleep(8)
+
+
+threading.Thread(target=rtsp_poller, daemon=True).start()
+
+
+# ── Alert sender ────────────────────────────────────────────────────────────
+def send_alert(email_img: Optional[bytes]):
     now = time.time()
     if now - last_alert[0] < COOLDOWN:
         print("Cooldown — skipping", flush=True)
         return
     last_alert[0] = now
 
-    img = "/tmp/smtp_snap.jpg"
-    img_data = None
-
-    if email_img:
+    # Priority 1: email attachment (vehicle detections always have one)
+    if email_img and is_complete_jpeg(email_img):
         img_data = email_img
-        print(f"Email attachment: {len(img_data)//1024}KB ✓", flush=True)
+        src = "email"
     else:
-        # No attachment (person/motion emails) — wait 16s for recording to end, then HTTP snap
-        print("No attachment — waiting for recording to end...", flush=True)
-        time.sleep(16)
-        cam_url = (f"http://{CAMERA_IP}/cgi-bin/api.cgi"
-                   f"?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}")
-        subprocess.run(["curl", "-s", "--max-time", "8", cam_url, "-o", img],
-                       capture_output=True)
-        if os.path.exists(img):
-            raw = open(img, "rb").read()
-            if is_complete_jpeg(raw):
-                img_data = raw
-                print(f"HTTP snap: {len(raw)//1024}KB ✓", flush=True)
-            else:
-                print(f"HTTP snap: {len(raw)//1024}KB ✗ (truncated)", flush=True)
+        # Priority 2: cached RTSP frame (captured seconds before motion)
+        with frame_lock:
+            img_data = latest_frame[0]
+        src = "cache"
 
-    if img_data is None:
-        print("No image — skipping", flush=True)
+    if not img_data:
+        print("No image available — skipping", flush=True)
         return
 
+    print(f"Using {src} frame: {len(img_data)//1024}KB", flush=True)
+
+    img     = "/tmp/smtp_snap.jpg"
+    img_out = "/tmp/smtp_snap_small.jpg"
     with open(img, "wb") as f:
         f.write(img_data)
 
-    # Resize to 1280px wide — panoramic becomes ~150KB for fast upload
-    img_send = "/tmp/smtp_snap_small.jpg"
-    subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_send],
+    subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_out],
                    capture_output=True)
-    if not os.path.exists(img_send) or os.path.getsize(img_send) < 5000:
-        img_send = img
+    if not os.path.exists(img_out) or os.path.getsize(img_out) < 5000:
+        img_out = img
 
     label = "🚨 OUT FRONT 🚨"
     try:
         subprocess.run([
             "curl", "-s",
             "-F", f"chat_id={CHAT_ID}",
-            "-F", f"photo=@{img_send}",
+            "-F", f"photo=@{img_out}",
             "-F", f"caption={label}",
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
         ], capture_output=True, timeout=60)
-        sz_send = os.path.getsize(img_send)
-        print(f"{label} sent {sz_send//1024}KB at {datetime.now().strftime('%H:%M:%S')}",
-              flush=True)
+        print(f"{label} sent {os.path.getsize(img_out)//1024}KB "
+              f"at {datetime.now().strftime('%H:%M:%S')}", flush=True)
     except subprocess.TimeoutExpired:
         print("Telegram upload timed out", flush=True)
 
 
+# ── SMTP handler ────────────────────────────────────────────────────────────
 class Authenticator:
     def __call__(self, server, session, envelope, mechanism, auth_data):
         from aiosmtpd.smtp import AuthResult
@@ -94,18 +117,16 @@ class MotionHandler:
         subject = str(msg.get("subject", ""))
         print(f"Email received: {subject}", flush=True)
 
-        # Extract JPEG attachment if Reolink included one
         email_img = None
         for part in msg.walk():
-            ct = part.get_content_type()
-            if ct in ("image/jpeg", "image/jpg", "image/png"):
+            if part.get_content_type() in ("image/jpeg", "image/jpg", "image/png"):
                 data = part.get_payload(decode=True)
                 if data and len(data) > 5000:
                     email_img = data
-                    print(f"Attachment found: {len(data)//1024}KB", flush=True)
+                    print(f"Attachment: {len(data)//1024}KB", flush=True)
                     break
 
-        threading.Thread(target=grab_and_send, args=(email_img,), daemon=True).start()
+        threading.Thread(target=send_alert, args=(email_img,), daemon=True).start()
         return "250 OK"
 
 
