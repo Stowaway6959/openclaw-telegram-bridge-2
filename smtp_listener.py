@@ -28,31 +28,35 @@ def grab_and_send():
 
     img = "/tmp/smtp_snap.jpg"
 
-    # Remove stale file so a failed ffmpeg can't send an old frame
-    try:
-        os.remove(img)
-    except FileNotFoundError:
-        pass
-
-    try:
-        subprocess.run([
-            FFMPEG, "-rtsp_transport", "tcp",
-            "-i", RTSP_URL,
-            "-vframes", "1", "-q:v", "3",
-            "-update", "1", img, "-y"
-        ], capture_output=True, timeout=15)
-    except subprocess.TimeoutExpired:
-        print("ffmpeg timed out", flush=True)
-        return
-    except Exception as e:
-        print(f"ffmpeg error: {e}", flush=True)
-        return
-
-    sz = os.path.getsize(img) if os.path.exists(img) else 0
-    print(f"Snap: {sz//1024}KB", flush=True)
+    # Retry up to 4 times — camera RTSP server can be temporarily busy during motion
+    sz = 0
+    for attempt in range(4):
+        try:
+            os.remove(img)
+        except FileNotFoundError:
+            pass
+        try:
+            subprocess.run([
+                FFMPEG, "-rtsp_transport", "tcp",
+                "-i", RTSP_URL,
+                "-vframes", "1", "-q:v", "3",
+                "-update", "1", img, "-y"
+            ], capture_output=True, timeout=12)
+        except subprocess.TimeoutExpired:
+            print(f"ffmpeg timeout attempt {attempt+1}", flush=True)
+            time.sleep(2)
+            continue
+        except Exception as e:
+            print(f"ffmpeg error: {e}", flush=True)
+            return
+        sz = os.path.getsize(img) if os.path.exists(img) else 0
+        print(f"Snap attempt {attempt+1}: {sz//1024}KB", flush=True)
+        if sz >= MIN_SNAP_BYTES:
+            break
+        time.sleep(2)
 
     if sz < MIN_SNAP_BYTES:
-        print(f"Snap too small ({sz//1024}KB) — skipping", flush=True)
+        print(f"All attempts failed — skipping", flush=True)
         return
 
     label = "🚨 OUT FRONT 🚨"
