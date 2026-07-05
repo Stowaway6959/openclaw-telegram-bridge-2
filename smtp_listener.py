@@ -169,5 +169,35 @@ controller = Controller(MotionHandler(), hostname="0.0.0.0", port=SMTP_PORT,
                         authenticator=Authenticator(), auth_required=False,
                         auth_require_tls=False)
 controller.start()
+
+
+def _reset_cam_email_push(ip):
+    """After our listener restarts, the camera's SMTP client is left with a
+    stale TCP session and drops into a multi-minute backoff -- no motion
+    emails arrive during that window. Toggling the camera's email-enable
+    off/on forces it to reconnect immediately."""
+    try:
+        import urllib.request, urllib.parse
+        base = f"http://{ip}/api.cgi"
+        login = json.dumps([{"cmd":"Login","param":{"User":{"Version":"0","userName":CAMERA_USER,"password":CAMERA_PASSWORD}}}]).encode()
+        r = urllib.request.urlopen(base + "?cmd=Login", login, timeout=5).read()
+        tok = json.loads(r)[0]["value"]["Token"]["name"]
+        u = base + "?cmd=GetEmailV20&token=" + tok
+        p = json.dumps([{"cmd":"GetEmailV20","action":0,"param":{"channel":0}}]).encode()
+        cfg = json.loads(urllib.request.urlopen(u, p, timeout=5).read())[0]["value"]["Email"]
+        for enable in (0, 1):
+            cfg["enable"] = enable
+            payload = json.dumps([{"cmd":"SetEmailV20","param":{"Email":cfg}}]).encode()
+            urllib.request.urlopen(base + "?cmd=SetEmailV20&token=" + tok, payload, timeout=5).read()
+            time.sleep(2)
+        print(f"[{ip}] email push reset", flush=True)
+    except Exception as e:
+        print(f"[{ip}] email reset err: {e}", flush=True)
+
+import json
+# Reset each configured cam in a background thread so listener stays responsive.
+for _cfg in {c["ip"] for c in CAMERAS.values()}:
+    threading.Thread(target=_reset_cam_email_push, args=(_cfg,), daemon=True).start()
+
 print("Ready -- waiting for camera emails...", flush=True)
 asyncio.get_event_loop().run_forever()
