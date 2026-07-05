@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Local SMTP server -- receives Reolink motion emails and sends Telegram alerts.
 
-Multi-camera aware:
-  - Parses Subject line to detect which camera triggered.
-  - Routes to per-camera IP + label from .env (CAMERA_HOST + CAMERA2_HOST).
-  - Falls back to CAMERA_HOST + generic label if subject doesn't match.
-
-Reolink subject convention (base64-encoded UTF-8):
-  "MotionTrack:Person Detected from FRONT at 2026/7/5 12:13:30"
-  "Person Detected from FRONT at 2026/7/5 12:13:30"
-  "MotionTrack:Vehicle Detected from BACKYARD at ..."
-The word between "from" and "at" is the camera name set in the Reolink app.
+Same shape as the May 22 baseline that worked reliably. Layered on top:
+  1. Uses SMTP attachment if the email carries one (skips camera round-trip).
+  2. If Snap CGI fallback used, checks JPEG ends with 0xFFD9 -- one retry.
+     (2026-07-05 gray-image bug: Reolink returned truncated JPEGs.)
+  3. PIL shrink to ~300KB before upload -- sips inverts Reolink Duo color
+     profile. Fixes rc=28 Telegram photo timeouts too.
+  4. -4 (IPv4) on Telegram curl -- launchd IPv6 resolve hangs (2026-07-05).
+  5. Multi-cam subject routing so Air 2 emails don't fetch from FRONT cam.
 """
-import asyncio, os, time, subprocess, threading, base64, re
+import asyncio, os, time, subprocess, threading, base64, re, email
 from datetime import datetime
 from dotenv import load_dotenv
 from aiosmtpd.controller import Controller
@@ -24,131 +22,119 @@ CHAT_ID         = os.environ["TELEGRAM_CHAT_ID"]
 CAMERA_USER     = os.environ.get("CAMERA_USER", "admin")
 CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 
-# Per-camera config. Key = uppercase substring matched against the Reolink
-# subject line. First match wins. Order matters -- more specific names first
-# (e.g. "AIR2" before "AIR"). If no key matches, DEFAULT is used.
 CAMERAS = {
-    "FRONT": {
-        "ip":    os.environ.get("CAMERA_HOST",  "192.168.1.199"),
-        "label": "🚨 OUT FRONT 🚨",
-    },
-    "AIR2": {
-        "ip":    os.environ.get("CAMERA2_HOST", "192.168.1.200"),
-        "label": "🚨 AIR 2 🚨",
-    },
-    # Aliases -- add whatever name you gave Air 2 in the Reolink app here.
-    # Multiple keys can point at the same config.
+    "FRONT": {"ip": os.environ.get("CAMERA_HOST",  "192.168.1.199"), "label": "🚨 OUT FRONT 🚨"},
+    "AIR2":  {"ip": os.environ.get("CAMERA2_HOST", "192.168.1.200"), "label": "🚨 AIR 2 🚨"},
     "BACK":     {"ip": os.environ.get("CAMERA2_HOST", "192.168.1.200"), "label": "🚨 BACK 🚨"},
     "BACKYARD": {"ip": os.environ.get("CAMERA2_HOST", "192.168.1.200"), "label": "🚨 BACKYARD 🚨"},
 }
-DEFAULT = {
-    "ip":    os.environ.get("CAMERA_HOST", "192.168.1.199"),
-    "label": "🚨 MOTION 🚨",
-}
+DEFAULT = {"ip": os.environ.get("CAMERA_HOST", "192.168.1.199"), "label": "🚨 MOTION 🚨"}
 
 SMTP_PORT = 2525
-COOLDOWN  = 15
-# Per-camera cooldown so a burst on one cam doesn't silence the other.
+COOLDOWN  = 60  # matches May 22 baseline -- 15s let motion bursts pile up
 last_alert = {}
-# Locks so two threads racing on the same camera don't both pass the cooldown
-# check + both deliver. Reolink sometimes fires 2-3 emails within a second
-# for a single motion event -- without a lock the check-and-set is racy.
-alert_locks = {}
-alert_locks_master = threading.Lock()
-
-def _lock_for(cam_key):
-    with alert_locks_master:
-        if cam_key not in alert_locks:
-            alert_locks[cam_key] = threading.Lock()
-        return alert_locks[cam_key]
 
 
-def _decode_subject(raw: str) -> str:
-    """Reolink encodes subjects as `=?UTF-8?B?<base64>?=`. Decode to plain."""
+def _decode_subject(raw):
     m = re.search(r"=\?UTF-8\?B\?([^?]+)\?=", raw)
-    if not m:
-        return raw
-    try:
-        return base64.b64decode(m.group(1)).decode("utf-8", errors="ignore")
-    except Exception:
-        return raw
+    if not m: return raw
+    try: return base64.b64decode(m.group(1)).decode("utf-8", errors="ignore")
+    except Exception: return raw
 
 
-def _match_camera(subject: str):
-    """Return (cam_key, cam_cfg) based on subject. Falls back to DEFAULT."""
-    subj_upper = subject.upper()
-    for key, cfg in CAMERAS.items():
-        if key in subj_upper:
-            return key, cfg
+def _match_camera(subject):
+    su = subject.upper()
+    for k, cfg in CAMERAS.items():
+        if k in su: return k, cfg
     return "DEFAULT", DEFAULT
 
 
-def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
-    # Serialize per-camera work so racing threads don't both pass the cooldown
-    # check + both fire an alert. Also ensures /tmp/smtp_snap_<cam>.jpg isn't
-    # being read + rewritten by two threads at once.
-    with _lock_for(cam_key):
-        now = time.time()
-        if now - last_alert.get(cam_key, 0) < COOLDOWN:
-            print(f"[{cam_key}] Cooldown -- skipping", flush=True)
-            return
-        last_alert[cam_key] = now
+def _valid_jpeg(path):
+    if not os.path.exists(path) or os.path.getsize(path) < 10_000:
+        return False
+    with open(path, "rb") as f:
+        f.seek(-2, 2)
+        return f.read() == b"\xff\xd9"
 
-    ip    = cam_cfg["ip"]
-    label = cam_cfg["label"]
-    img   = f"/tmp/smtp_snap_{cam_key.lower()}.jpg"
+
+def _extract_attachment(raw_bytes, out_path):
+    try:
+        msg = email.message_from_bytes(raw_bytes)
+        for part in msg.walk():
+            if (part.get_content_type() or "").lower().startswith("image/"):
+                data = part.get_payload(decode=True) or b""
+                if len(data) >= 10_000 and data[-2:] == b"\xff\xd9":
+                    with open(out_path, "wb") as f: f.write(data)
+                    return True
+    except Exception as e:
+        print(f"attach err: {e}", flush=True)
+    return False
+
+
+def grab_and_send(cam_key, cam_cfg, raw_bytes):
+    now = time.time()
+    if now - last_alert.get(cam_key, 0) < COOLDOWN:
+        print(f"[{cam_key}] Cooldown -- skipping", flush=True)
+        return
+    last_alert[cam_key] = now
+
+    ip, label = cam_cfg["ip"], cam_cfg["label"]
+    img     = f"/tmp/smtp_snap_{cam_key.lower()}_{os.getpid()}_{int(now*1000)}.jpg"
+    small   = img.replace('.jpg', '_small.jpg')
     cam_url = f"http://{ip}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
 
-    def _fetch_ok():
-        subprocess.run(["curl", "-s", "--max-time", "30", cam_url, "-o", img], capture_output=True)
-        if not os.path.exists(img) or os.path.getsize(img) < 10_000:
-            return False
-        with open(img, "rb") as f:
-            f.seek(-2, 2)
-            return f.read() == b"\xff\xd9"
+    if _extract_attachment(raw_bytes, img):
+        print(f"[{cam_key}] using SMTP attachment", flush=True)
+    else:
+        subprocess.run(["curl", "-s", "--max-time", "15", cam_url, "-o", img], capture_output=True)
+        if not _valid_jpeg(img):
+            # ponytail: one retry -- Reolink Snap CGI truncates when busy
+            time.sleep(1)
+            subprocess.run(["curl", "-s", "--max-time", "15", cam_url, "-o", img], capture_output=True)
+            if not _valid_jpeg(img):
+                # No image possible -- send text-only so event still surfaces.
+                print(f"[{cam_key}] snap failed -- text-only alert", flush=True)
+                subprocess.run(
+                    ["curl", "-4", "-s", "--max-time", "20",
+                     "-d", f"chat_id={CHAT_ID}",
+                     "-d", f"text={label} (no image)",
+                     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"],
+                    capture_output=True, timeout=30
+                )
+                try: os.remove(img)
+                except OSError: pass
+                return
 
-    ok = False
-    for attempt in range(4):
-        if _fetch_ok():
-            ok = True
-            if attempt: print(f"[{cam_key}] Snap OK on attempt {attempt+1}", flush=True)
-            break
-        time.sleep(1 + attempt)
-    # Curl flags rationale:
-    #   -4              force IPv4 -- under launchd context the IPv6 resolve
-    #                   for api.telegram.org would hang past 30s while the
-    #                   same shell invocation returned in 3s (2026-07-05).
-    #   --max-time 20   curl-side wall so a stuck TCP doesn't ride out to
-    #                   Python's 45s subprocess timeout.
-    #   NO --retry -- earlier version had `--retry 2 --retry-delay 2` which
-    #   compounded to 79s worst-case, blowing past the Python 60s timeout
-    #   and dropping every alert as TimeoutExpired (2026-07-05 fire).
-    tg_flags = ["-4", "-s", "--max-time", "20"]
-
-    if not ok:
-        # Air 2 (battery) may not respond to Snap CGI when asleep. Send
-        # text-only alert so the event still surfaces.
-        print(f"[{cam_key}] Snap failed -- sending text-only alert", flush=True)
-        try:
-            subprocess.run(["curl", *tg_flags, "-F", f"chat_id={CHAT_ID}",
-                            "-F", f"text={label} (no image)\n{subject_plain}",
-                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"],
-                           capture_output=True, timeout=45)
-        except subprocess.TimeoutExpired:
-            print(f"[{cam_key}] text-only timeout -- Telegram unreachable", flush=True)
-            return
-        print(f"[{cam_key}] text-only sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
-        return
-
+    upload = img
     try:
-        subprocess.run(["curl", *tg_flags, "-F", f"chat_id={CHAT_ID}",
-                        "-F", f"photo=@{img}", "-F", f"caption={label}",
-                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
-                       capture_output=True, timeout=45)
-    except subprocess.TimeoutExpired:
-        print(f"[{cam_key}] photo timeout -- Telegram unreachable", flush=True)
-        return
-    print(f"[{cam_key}] {label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+        from PIL import Image
+        with Image.open(img) as im:
+            if im.size[0] > 1600:
+                im.thumbnail((1600, 1600), Image.LANCZOS)
+            im.convert("RGB").save(small, "JPEG", quality=85, optimize=True)
+        if os.path.getsize(small) > 5000:
+            upload = small
+    except Exception as e:
+        print(f"[{cam_key}] shrink err: {e}", flush=True)
+
+    print(f"[{cam_key}] uploading {os.path.getsize(upload)//1024}KB", flush=True)
+    r = subprocess.run(
+        ["curl", "-4", "-s", "--max-time", "60",
+         "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{upload}", "-F", f"caption={label}",
+         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
+        capture_output=True, timeout=75
+    )
+    body = r.stdout.decode("utf-8", errors="ignore")[:400]
+    if r.returncode != 0:
+        print(f"[{cam_key}] tg curl rc={r.returncode}", flush=True)
+    elif '"ok":true' not in body:
+        print(f"[{cam_key}] tg rejected: {body}", flush=True)
+    else:
+        print(f"[{cam_key}] {label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
+
+    for p in (img, small):
+        try: os.remove(p)
+        except OSError: pass
 
 
 class Authenticator:
@@ -168,7 +154,7 @@ class MotionHandler:
         cam_key, cam_cfg = _match_camera(subject_plain)
         print(f"Email received [{cam_key}]: {subject_plain}", flush=True)
         threading.Thread(target=grab_and_send,
-                         args=(cam_key, cam_cfg, subject_plain),
+                         args=(cam_key, cam_cfg, envelope.content),
                          daemon=True).start()
         return "250 OK"
 
