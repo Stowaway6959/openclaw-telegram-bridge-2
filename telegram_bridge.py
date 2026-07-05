@@ -37,7 +37,17 @@ def request_calendar_access():
     store.requestAccessToEntityType_completion_(EKEntityTypeReminder, lambda g, e: None)
     time.sleep(2)
 
-def send_telegram(message, photo_path=None):
+def _in_quiet_hours():
+    # Mute non-critical Reolink pings between 22:00 and 07:00 local time.
+    # Avoids 50+ camera motion alerts overnight collapsing into the same
+    # inbox as business-critical Stripe / CoA / deploy alerts.
+    h = time.localtime().tm_hour
+    return h >= 22 or h < 7
+
+def send_telegram(message, photo_path=None, force=False):
+    if _in_quiet_hours() and not force:
+        print(f"Telegram suppressed (quiet hours 22:00-07:00): {message[:60]}")
+        return
     try:
         if photo_path:
             subprocess.run(['curl', '-s', '-F', f'chat_id={CHAT_ID}', '-F', f'photo=@{photo_path}',
@@ -388,13 +398,13 @@ def send_auto_briefing(btype):
     if btype == "morning":
         request_calendar_access()
         msg = get_briefing()
-        send_telegram(msg)
+        send_telegram(msg, force=True)  # ponytail: scheduled briefings bypass 22-07 quiet hours
         send_ntfy("Morning Briefing", msg[:200], "default")
         print("Morning briefing sent!")
     elif btype == "evening":
         request_calendar_access()
         msg = get_evening_briefing()
-        send_telegram(msg)
+        send_telegram(msg, force=True)  # ponytail: scheduled briefings bypass 22-07 quiet hours
         send_ntfy("Evening Briefing", msg[:200], "default")
         print("Evening briefing sent!")
     elif btype == "hourly_camera":
