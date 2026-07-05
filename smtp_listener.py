@@ -71,7 +71,7 @@ def _extract_attachment(raw_bytes, out_path):
     return False
 
 
-def grab_and_send(cam_key, cam_cfg, raw_bytes):
+def grab_and_send(cam_key, cam_cfg, raw_bytes, subject_plain):
     now = time.time()
     if now - last_alert.get(cam_key, 0) < COOLDOWN:
         print(f"[{cam_key}] Cooldown -- skipping", flush=True)
@@ -86,18 +86,22 @@ def grab_and_send(cam_key, cam_cfg, raw_bytes):
     if _extract_attachment(raw_bytes, img):
         print(f"[{cam_key}] using SMTP attachment", flush=True)
     else:
-        subprocess.run(["curl", "-s", "--max-time", "15", cam_url, "-o", img], capture_output=True)
+        subprocess.run(["curl", "-s", "--max-time", "30", cam_url, "-o", img], capture_output=True)
         if not _valid_jpeg(img):
             # ponytail: one retry -- Reolink Snap CGI truncates when busy
             time.sleep(1)
-            subprocess.run(["curl", "-s", "--max-time", "15", cam_url, "-o", img], capture_output=True)
+            subprocess.run(["curl", "-s", "--max-time", "30", cam_url, "-o", img], capture_output=True)
             if not _valid_jpeg(img):
                 # No image possible -- send text-only so event still surfaces.
                 print(f"[{cam_key}] snap failed -- text-only alert", flush=True)
+                # Strip the "Motion Track:" prefix + everything after "at" for
+                # a compact one-liner.
+                evt = re.sub(r"^Motion Track:", "", subject_plain)
+                evt = re.sub(r"\s+at\s+.*$", "", evt).strip()
                 subprocess.run(
                     ["curl", "-4", "-s", "--max-time", "20",
                      "-d", f"chat_id={CHAT_ID}",
-                     "-d", f"text={label} (no image)",
+                     "-d", f"text={label} (no image) — {evt}",
                      f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"],
                     capture_output=True, timeout=30
                 )
@@ -154,7 +158,7 @@ class MotionHandler:
         cam_key, cam_cfg = _match_camera(subject_plain)
         print(f"Email received [{cam_key}]: {subject_plain}", flush=True)
         threading.Thread(target=grab_and_send,
-                         args=(cam_key, cam_cfg, envelope.content),
+                         args=(cam_key, cam_cfg, envelope.content, subject_plain),
                          daemon=True).start()
         return "250 OK"
 
