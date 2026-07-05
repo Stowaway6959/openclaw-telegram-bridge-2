@@ -31,7 +31,7 @@ CAMERAS = {
 DEFAULT = {"ip": os.environ.get("CAMERA_HOST", "192.168.1.199"), "label": "🚨 MOTION 🚨"}
 
 SMTP_PORT = 2525
-COOLDOWN  = 60  # matches May 22 baseline -- 15s let motion bursts pile up
+COOLDOWN  = 30  # matches camera-side email interval (SetEmailV20 "30 Seconds")
 last_alert = {}
 
 
