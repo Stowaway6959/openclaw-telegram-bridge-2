@@ -104,12 +104,16 @@ def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
     rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_sub"
 
     def _fetch_ok():
-        r = subprocess.run(
-            ["/opt/homebrew/bin/ffmpeg", "-y", "-rtsp_transport", "tcp",
-             "-fflags", "nobuffer", "-flags", "low_delay",
-             "-analyzeduration", "500000", "-probesize", "500000",
-             "-i", rtsp, "-frames:v", "1", "-q:v", "3", img],
-            capture_output=True, timeout=45)
+        try:
+            r = subprocess.run(
+                ["/opt/homebrew/bin/ffmpeg", "-y", "-rtsp_transport", "tcp",
+                 "-fflags", "nobuffer", "-flags", "low_delay",
+                 "-analyzeduration", "500000", "-probesize", "500000",
+                 "-i", rtsp, "-frames:v", "1", "-q:v", "3", img],
+                capture_output=True, timeout=25)
+        except subprocess.TimeoutExpired:
+            print(f"[{cam_key}] ffmpeg timeout", flush=True)
+            return False
         if r.returncode != 0 or not os.path.exists(img) or os.path.getsize(img) < 5_000:
             return False
         with open(img, "rb") as f:
