@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local SMTP server -- receives Reolink motion emails and sends Telegram alerts."""
-import asyncio, os, time, subprocess, threading, email
+import asyncio, os, time, subprocess, threading, email, json
+import urllib.request
 from datetime import datetime
 from dotenv import load_dotenv
 from aiosmtpd.controller import Controller
@@ -92,10 +93,35 @@ class MotionHandler:
         return "250 OK"
 
 
+def _reset_email_push():
+    """Toggle camera email-enable off/on to break SMTP backoff. A listener
+    restart leaves the camera's SMTP client in a multi-minute backoff --
+    without this reset, real motion events get missed for 3-10 minutes
+    after every restart."""
+    try:
+        base = f"http://{CAMERA_IP}/api.cgi"
+        login = json.dumps([{"cmd": "Login", "param": {"User": {"Version": "0",
+                 "userName": CAMERA_USER, "password": CAMERA_PASSWORD}}}]).encode()
+        tok = json.loads(urllib.request.urlopen(base + "?cmd=Login", login, timeout=5).read())[0]["value"]["Token"]["name"]
+        p = json.dumps([{"cmd": "GetEmailV20", "action": 0,
+                         "param": {"channel": 0}}]).encode()
+        cfg = json.loads(urllib.request.urlopen(
+            base + "?cmd=GetEmailV20&token=" + tok, p, timeout=5).read())[0]["value"]["Email"]
+        for enable in (0, 1):
+            cfg["enable"] = enable
+            payload = json.dumps([{"cmd": "SetEmailV20", "param": {"Email": cfg}}]).encode()
+            urllib.request.urlopen(base + "?cmd=SetEmailV20&token=" + tok, payload, timeout=5).read()
+            time.sleep(2)
+        print("email push reset -- backoff cleared", flush=True)
+    except Exception as e:
+        print(f"email reset err: {e}", flush=True)
+
+
 print(f"📧 SMTP listener on port {SMTP_PORT}", flush=True)
 controller = Controller(MotionHandler(), hostname="0.0.0.0", port=SMTP_PORT,
                         authenticator=Authenticator(), auth_required=False,
                         auth_require_tls=False)
 controller.start()
+threading.Thread(target=_reset_email_push, daemon=True).start()
 print("Ready -- waiting for camera emails...", flush=True)
 asyncio.get_event_loop().run_forever()
