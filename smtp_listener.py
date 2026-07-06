@@ -84,16 +84,22 @@ def _match_camera(subject: str):
 
 
 def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
-    # Serialize per-camera work so racing threads don't both pass the cooldown
-    # check + both fire an alert. Also ensures /tmp/smtp_snap_<cam>.jpg isn't
-    # being read + rewritten by two threads at once.
+    # Serialize the WHOLE per-camera pipeline. Reolink RTSP only serves one
+    # client at a time; if 3 motion emails fire in a burst, 3 threads race
+    # ffmpeg against the camera and every one hits the 25s timeout
+    # (2026-07-06 fire: main-stream grab worked in 6s solo but 100% failed
+    # under motion-burst concurrency). Cooldown skip is now checked once at
+    # the top; second event through the lock is a repeat within COOLDOWN.
     with _lock_for(cam_key):
         now = time.time()
         if now - last_alert.get(cam_key, 0) < COOLDOWN:
             print(f"[{cam_key}] Cooldown -- skipping", flush=True)
             return
         last_alert[cam_key] = now
+        _grab_and_send_locked(cam_key, cam_cfg, subject_plain)
 
+
+def _grab_and_send_locked(cam_key: str, cam_cfg: dict, subject_plain: str):
     ip    = cam_cfg["ip"]
     label = cam_cfg["label"]
     img   = f"/tmp/smtp_snap_{cam_key.lower()}.jpg"
