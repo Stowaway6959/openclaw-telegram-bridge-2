@@ -28,19 +28,16 @@ CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 # Per-camera config. Key = uppercase substring matched against the Reolink
 # subject line. First match wins. Order matters -- more specific names first
 # (e.g. "AIR2" before "AIR"). If no key matches, DEFAULT is used.
+# Two cameras: FRONT (.199) and BACK (.200). "air2" in this repo's name is
+# the Mac running the bridge, not a camera. BACKYARD kept as a subject alias
+# in case the Reolink app name is the longer form.
 CAMERAS = {
     "FRONT": {
         "ip":    os.environ.get("CAMERA_HOST",  "192.168.1.199"),
         "label": "🚨 OUT FRONT 🚨",
     },
-    "AIR2": {
-        "ip":    os.environ.get("CAMERA2_HOST", "192.168.1.200"),
-        "label": "🚨 AIR 2 🚨",
-    },
-    # Aliases -- add whatever name you gave Air 2 in the Reolink app here.
-    # Multiple keys can point at the same config.
-    "BACK":     {"ip": os.environ.get("CAMERA2_HOST", "192.168.1.200"), "label": "🚨 BACK 🚨"},
     "BACKYARD": {"ip": os.environ.get("CAMERA2_HOST", "192.168.1.200"), "label": "🚨 BACKYARD 🚨"},
+    "BACK":     {"ip": os.environ.get("CAMERA2_HOST", "192.168.1.200"), "label": "🚨 BACK 🚨"},
 }
 DEFAULT = {
     "ip":    os.environ.get("CAMERA_HOST", "192.168.1.199"),
@@ -69,14 +66,13 @@ def _lock_for(cam_key):
 # timeouts in smtp.log). Keeping one session open per camera and writing the
 # newest frame to disk 1x/sec turns the alert path into a file read.
 # Both cams are on constant power (confirmed 07-06), so always-on is safe.
-# AIR2/BACK/BACKYARD are aliases for the same camera -> same file; startup
-# dedups readers by file path.
-_AIR2_IMG = "/tmp/smtp_stream_air2.jpg"
+# BACK/BACKYARD alias the same camera -> same file; startup dedups readers
+# by file path.
+_BACK_IMG = "/tmp/smtp_stream_back.jpg"
 STREAM_CAMS = {
     "FRONT":    "/tmp/smtp_stream_front.jpg",
-    "AIR2":     _AIR2_IMG,
-    "BACK":     _AIR2_IMG,
-    "BACKYARD": _AIR2_IMG,
+    "BACK":     _BACK_IMG,
+    "BACKYARD": _BACK_IMG,
 }
 
 def _stream_reader(cam_key: str, ip: str, out: str):
