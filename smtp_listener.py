@@ -64,12 +64,20 @@ def _lock_for(cam_key):
         return alert_locks[cam_key]
 
 
-# ponytail: persistent substream reader for the wired FRONT cam only. A cold
-# RTSP handshake takes 7-8s idle and >25s while the camera is busy with a
-# motion event (53 ffmpeg timeouts in smtp.log). Keeping one session open and
-# writing the newest frame to disk 1x/sec turns the alert path into a file
-# read. Air 2 is battery-powered -- never stream it continuously.
-STREAM_CAMS = {"FRONT": "/tmp/smtp_stream_front.jpg"}
+# ponytail: persistent substream readers. A cold RTSP handshake takes 7-11s
+# idle and >25s while the camera is busy with a motion event (53 ffmpeg
+# timeouts in smtp.log). Keeping one session open per camera and writing the
+# newest frame to disk 1x/sec turns the alert path into a file read.
+# Both cams are on constant power (confirmed 07-06), so always-on is safe.
+# AIR2/BACK/BACKYARD are aliases for the same camera -> same file; startup
+# dedups readers by file path.
+_AIR2_IMG = "/tmp/smtp_stream_air2.jpg"
+STREAM_CAMS = {
+    "FRONT":    "/tmp/smtp_stream_front.jpg",
+    "AIR2":     _AIR2_IMG,
+    "BACK":     _AIR2_IMG,
+    "BACKYARD": _AIR2_IMG,
+}
 
 def _stream_reader(cam_key: str, ip: str, out: str):
     rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_sub"
@@ -283,7 +291,11 @@ class MotionHandler:
 
 print(f"📧 SMTP listener on port {SMTP_PORT}", flush=True)
 print(f"Cameras loaded: {list(CAMERAS.keys())}", flush=True)
+_started = set()
 for _key, _out in STREAM_CAMS.items():
+    if _out in _started:
+        continue
+    _started.add(_out)
     threading.Thread(target=_stream_reader,
                      args=(_key, CAMERAS[_key]["ip"], _out),
                      daemon=True).start()
