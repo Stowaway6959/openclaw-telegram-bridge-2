@@ -12,7 +12,7 @@ Reolink subject convention (base64-encoded UTF-8):
   "MotionTrack:Vehicle Detected from BACKYARD at ..."
 The word between "from" and "at" is the camera name set in the Reolink app.
 """
-import asyncio, os, time, subprocess, threading, base64, re, json
+import asyncio, os, time, subprocess, threading, base64, re, json, email
 import urllib.request
 from datetime import datetime
 from dotenv import load_dotenv
@@ -156,7 +156,7 @@ def _match_camera(subject: str):
     return "DEFAULT", DEFAULT
 
 
-def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
+def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str, attached: bytes = None):
     # Serialize per-camera work so racing threads don't both pass the cooldown
     # check + both fire an alert. Also ensures /tmp/smtp_snap_<cam>.jpg isn't
     # being read + rewritten by two threads at once.
@@ -170,6 +170,17 @@ def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
     ip    = cam_cfg["ip"]
     label = cam_cfg["label"]
     img   = f"/tmp/smtp_snap_{cam_key.lower()}.jpg"
+
+    # ponytail: attachment fast-path. Reolink attaches a JPEG to plain
+    # 'Person/Vehicle Detected' events; camera can't serve RTSP during motion,
+    # so this is the only reliable image source when present.
+    if attached:
+        with open(img, "wb") as f:
+            f.write(attached)
+        print(f"[{cam_key}] using email attachment ({len(attached)}B)", flush=True)
+        _attach_ok = True
+    else:
+        _attach_ok = False
     # ponytail: pull one frame from the RTSP substream (1536x432, ~230KB)
     # instead of Snap CGI which pulls the 7680x2160 main stream (~3MB) and
     # truncates when the camera CPU is busy processing motion. Substream is
@@ -193,16 +204,19 @@ def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
             f.seek(-2, 2)
             return f.read() == b"\xff\xd9"
 
-    ok = _fresh_stream_frame(cam_key, img)
-    if ok:
-        print(f"[{cam_key}] frame from persistent stream", flush=True)
+    if _attach_ok:
+        ok = True
     else:
-        for attempt in range(2):
-            if _fetch_ok():
-                ok = True
-                if attempt: print(f"[{cam_key}] RTSP-sub OK on attempt {attempt+1}", flush=True)
-                break
-            time.sleep(1)
+        ok = _fresh_stream_frame(cam_key, img)
+        if ok:
+            print(f"[{cam_key}] frame from persistent stream", flush=True)
+        else:
+            for attempt in range(2):
+                if _fetch_ok():
+                    ok = True
+                    if attempt: print(f"[{cam_key}] RTSP-sub OK on attempt {attempt+1}", flush=True)
+                    break
+                time.sleep(1)
     # Curl flags rationale:
     #   -4              force IPv4 -- under launchd context the IPv6 resolve
     #                   for api.telegram.org would hang past 30s while the
@@ -265,6 +279,24 @@ class Authenticator:
         return AuthResult(success=True)
 
 
+def _extract_jpeg(raw_bytes: bytes):
+    """Reolink attaches a JPEG to plain 'Person/Vehicle Detected' events (but
+    NOT to 'Motion Track:...' events). Return the first image bytes found,
+    else None. Camera CANNOT serve RTSP during motion, so this attachment is
+    the only reliable image source when the event has one."""
+    try:
+        msg = email.message_from_bytes(raw_bytes)
+        for part in msg.walk():
+            ct = (part.get_content_type() or '').lower()
+            if ct.startswith('image/'):
+                data = part.get_payload(decode=True)
+                if data and len(data) > 5_000 and data[:2] == b'\xff\xd8':
+                    return data
+    except Exception as e:
+        print(f"[email] attachment parse err: {e}", flush=True)
+    return None
+
+
 class MotionHandler:
     async def handle_DATA(self, server, session, envelope):
         subject_raw = ""
@@ -274,9 +306,12 @@ class MotionHandler:
                 break
         subject_plain = _decode_subject(subject_raw)
         cam_key, cam_cfg = _match_camera(subject_plain)
-        print(f"Email received [{cam_key}]: {subject_plain}", flush=True)
+        attached = _extract_jpeg(envelope.content)
+        print(f"Email received [{cam_key}]: {subject_plain}"
+              + (f"  (jpeg attached {len(attached)}B)" if attached else "  (no attachment)"),
+              flush=True)
         threading.Thread(target=grab_and_send,
-                         args=(cam_key, cam_cfg, subject_plain),
+                         args=(cam_key, cam_cfg, subject_plain, attached),
                          daemon=True).start()
         return "250 OK"
 
