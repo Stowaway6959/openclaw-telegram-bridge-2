@@ -328,8 +328,10 @@ def _reset_cam_email_push(ip):
         print(f"[{ip}] email reset err: {e}", flush=True)
 
 
-for _ip in {c["ip"] for c in CAMERAS.values()}:
-    threading.Thread(target=_reset_cam_email_push, args=(_ip,), daemon=True).start()
+# ponytail: FRONT-only reset. BACK email push is intentionally disabled at
+# the camera; auto-resetting would flip enable=1 back on. Re-add BACK IP here
+# if you want alerts from it again.
+threading.Thread(target=_reset_cam_email_push, args=(CAMERAS["FRONT"]["ip"],), daemon=True).start()
 
 print("Ready -- waiting for camera emails...", flush=True)
 asyncio.get_event_loop().run_forever()
