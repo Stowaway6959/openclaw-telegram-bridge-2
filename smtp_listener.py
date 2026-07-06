@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local SMTP server -- receives Reolink motion emails and sends Telegram alerts."""
-import asyncio, os, time, subprocess, threading
+import asyncio, os, time, subprocess, threading, email
 from datetime import datetime
 from dotenv import load_dotenv
 from aiosmtpd.controller import Controller
@@ -16,7 +16,23 @@ SMTP_PORT       = 2525
 COOLDOWN        = 15
 last_alert      = [0]
 
-def grab_and_send(subject):
+def _extract_jpeg(raw_bytes):
+    """Reolink attaches a JPEG to plain 'Person/Vehicle Detected' emails.
+    Returns bytes of first valid image/jpeg attachment, else None. Motion
+    Track events have no attachment."""
+    try:
+        msg = email.message_from_bytes(raw_bytes)
+        for part in msg.walk():
+            if (part.get_content_type() or "").lower().startswith("image/"):
+                data = part.get_payload(decode=True)
+                if data and len(data) > 10_000 and data[:2] == b"\xff\xd8":
+                    return data
+    except Exception:
+        pass
+    return None
+
+
+def grab_and_send(subject, attached=None):
     now = time.time()
     if now - last_alert[0] < COOLDOWN:
         print("Cooldown -- skipping", flush=True)
@@ -28,7 +44,14 @@ def grab_and_send(subject):
     cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
     label   = "🚨 OUT FRONT 🚨"
 
-    subprocess.run(["curl", "-s", "--max-time", "15", cam_url, "-o", img], capture_output=True)
+    if attached:
+        # ponytail: use the JPEG the camera attached to the email. Saves the
+        # Snap CGI roundtrip (~1-2s) AND shows the actual motion-moment frame
+        # instead of a delayed "now" snapshot.
+        with open(img, "wb") as f:
+            f.write(attached)
+    else:
+        subprocess.run(["curl", "-s", "--max-time", "15", cam_url, "-o", img], capture_output=True)
 
     if os.path.exists(img) and os.path.getsize(img) > 10_000:
         subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_out], capture_output=True)
@@ -61,8 +84,11 @@ class MotionHandler:
             if line.lower().startswith("subject:"):
                 subject = line[8:].strip()
                 break
-        print(f"Email received: {subject}", flush=True)
-        threading.Thread(target=grab_and_send, args=(subject,), daemon=True).start()
+        attached = _extract_jpeg(envelope.content)
+        print(f"Email received: {subject}"
+              + (f"  (attached {len(attached)}B)" if attached else "  (no attach)"),
+              flush=True)
+        threading.Thread(target=grab_and_send, args=(subject, attached), daemon=True).start()
         return "250 OK"
 
 
