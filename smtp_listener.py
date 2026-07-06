@@ -97,23 +97,32 @@ def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
     ip    = cam_cfg["ip"]
     label = cam_cfg["label"]
     img   = f"/tmp/smtp_snap_{cam_key.lower()}.jpg"
-    cam_url = f"http://{ip}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
+    # ponytail: pull one frame from the RTSP substream (1536x432, ~230KB)
+    # instead of Snap CGI which pulls the 7680x2160 main stream (~3MB) and
+    # truncates when the camera CPU is busy processing motion. Substream is
+    # already being encoded continuously, so this adds ~0 camera CPU load.
+    rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_sub"
 
     def _fetch_ok():
-        subprocess.run(["curl", "-s", "--max-time", "30", cam_url, "-o", img], capture_output=True)
-        if not os.path.exists(img) or os.path.getsize(img) < 10_000:
+        r = subprocess.run(
+            ["/opt/homebrew/bin/ffmpeg", "-y", "-rtsp_transport", "tcp",
+             "-fflags", "nobuffer", "-flags", "low_delay",
+             "-analyzeduration", "500000", "-probesize", "500000",
+             "-i", rtsp, "-frames:v", "1", "-q:v", "3", img],
+            capture_output=True, timeout=45)
+        if r.returncode != 0 or not os.path.exists(img) or os.path.getsize(img) < 5_000:
             return False
         with open(img, "rb") as f:
             f.seek(-2, 2)
             return f.read() == b"\xff\xd9"
 
     ok = False
-    for attempt in range(4):
+    for attempt in range(2):
         if _fetch_ok():
             ok = True
-            if attempt: print(f"[{cam_key}] Snap OK on attempt {attempt+1}", flush=True)
+            if attempt: print(f"[{cam_key}] RTSP-sub OK on attempt {attempt+1}", flush=True)
             break
-        time.sleep(1 + attempt)
+        time.sleep(1)
     # Curl flags rationale:
     #   -4              force IPv4 -- under launchd context the IPv6 resolve
     #                   for api.telegram.org would hang past 30s while the
