@@ -63,6 +63,62 @@ def _lock_for(cam_key):
         return alert_locks[cam_key]
 
 
+# ponytail: persistent substream reader for the wired FRONT cam only. A cold
+# RTSP handshake takes 7-8s idle and >25s while the camera is busy with a
+# motion event (53 ffmpeg timeouts in smtp.log). Keeping one session open and
+# writing the newest frame to disk 1x/sec turns the alert path into a file
+# read. Air 2 is battery-powered -- never stream it continuously.
+STREAM_CAMS = {"FRONT": "/tmp/smtp_stream_front.jpg"}
+
+def _stream_reader(cam_key: str, ip: str, out: str):
+    rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_sub"
+    # Orphaned readers from a previous listener survive launchd kickstart and
+    # hold a camera RTSP slot, starving the new reader (observed 07-06).
+    subprocess.run(["pkill", "-f", f"update 1 {out}"], capture_output=True)
+    time.sleep(1)
+    while True:
+        subprocess.run(
+            # -timeout (rtsp socket I/O, us): a stalled RTSP socket otherwise
+            # hangs ffmpeg forever with no output and no exit (observed
+            # 07:44 07-06). 15s stall -> ffmpeg errors out -> loop restarts.
+            # NOT -rw_timeout: this build's rtsp demuxer rejects it.
+            ["/opt/homebrew/bin/ffmpeg", "-y", "-loglevel", "error",
+             "-timeout", "15000000",
+             "-rtsp_transport", "tcp", "-i", rtsp,
+             "-vf", "fps=1", "-q:v", "3", "-update", "1", out],
+            capture_output=True)
+        print(f"[{cam_key}] stream reader exited -- restarting in 5s", flush=True)
+        time.sleep(5)
+
+def _fresh_stream_frame(cam_key: str, img: str) -> bool:
+    """Copy the persistent reader's latest frame to img if it's <10s old.
+    Retries once on a truncated JPEG (ffmpeg -update writes in place)."""
+    out = STREAM_CAMS.get(cam_key)
+    if not out:
+        return False
+    reason = "?"
+    for _ in range(2):
+        try:
+            age = time.time() - os.path.getmtime(out)
+            size = os.path.getsize(out)
+            if age < 10 and size > 5_000:
+                with open(out, "rb") as f:
+                    data = f.read()
+                if data[-2:] == b"\xff\xd9":
+                    with open(img, "wb") as f:
+                        f.write(data)
+                    return True
+                reason = "truncated jpeg"
+            else:
+                reason = f"age={age:.1f}s size={size}"
+        except OSError as e:
+            reason = repr(e)
+            break
+        time.sleep(0.3)
+    print(f"[{cam_key}] stream frame rejected ({reason}) -- falling back to fetch", flush=True)
+    return False
+
+
 def _decode_subject(raw: str) -> str:
     """Reolink encodes subjects as `=?UTF-8?B?<base64>?=`. Decode to plain."""
     m = re.search(r"=\?UTF-8\?B\?([^?]+)\?=", raw)
@@ -120,13 +176,16 @@ def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
             f.seek(-2, 2)
             return f.read() == b"\xff\xd9"
 
-    ok = False
-    for attempt in range(2):
-        if _fetch_ok():
-            ok = True
-            if attempt: print(f"[{cam_key}] RTSP-sub OK on attempt {attempt+1}", flush=True)
-            break
-        time.sleep(1)
+    ok = _fresh_stream_frame(cam_key, img)
+    if ok:
+        print(f"[{cam_key}] frame from persistent stream", flush=True)
+    else:
+        for attempt in range(2):
+            if _fetch_ok():
+                ok = True
+                if attempt: print(f"[{cam_key}] RTSP-sub OK on attempt {attempt+1}", flush=True)
+                break
+            time.sleep(1)
     # Curl flags rationale:
     #   -4              force IPv4 -- under launchd context the IPv6 resolve
     #                   for api.telegram.org would hang past 30s while the
@@ -188,6 +247,11 @@ class MotionHandler:
 
 print(f"📧 SMTP listener on port {SMTP_PORT}", flush=True)
 print(f"Cameras loaded: {list(CAMERAS.keys())}", flush=True)
+for _key, _out in STREAM_CAMS.items():
+    threading.Thread(target=_stream_reader,
+                     args=(_key, CAMERAS[_key]["ip"], _out),
+                     daemon=True).start()
+    print(f"[{_key}] persistent substream reader started -> {_out}", flush=True)
 controller = Controller(MotionHandler(), hostname="0.0.0.0", port=SMTP_PORT,
                         authenticator=Authenticator(), auth_required=False,
                         auth_require_tls=False)
