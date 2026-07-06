@@ -27,6 +27,7 @@ LABEL          = "🚨 OUT FRONT (FTP) 🚨"
 os.makedirs(os.path.join(ROOT, "motion"), exist_ok=True)
 _last_send = [0.0]
 _seen = set()
+_size_seen = {}
 
 def _send(path):
     now = time.time()
@@ -126,15 +127,29 @@ def _folder_watcher():
                         try: os.remove(p)
                         except OSError: pass
                         continue
-                    # Stable-mtime check: skip if file was modified in last
-                    # 0.3s (camera may still be writing).
+                    # Wait for upload to complete: size must be stable across
+                    # two polls AND >10KB. Camera-side FTP is slow (~10KB/s
+                    # for a 3MB file = 5 min); grabbing a 0-byte file early
+                    # kills the in-flight upload.
+                    try:
+                        size1 = os.path.getsize(p)
+                    except OSError:
+                        continue
+                    if size1 < 10_000:
+                        continue  # still starting; don't touch it
+                    prior = _size_seen.get(p, -1)
+                    if size1 != prior:
+                        _size_seen[p] = size1
+                        continue  # still growing
+                    # Size stable. Also require mtime > 1s to be safe.
                     try:
                         age = time.time() - os.path.getmtime(p)
                     except OSError:
                         continue
-                    if age < 0.3:
+                    if age < 1.0:
                         continue
                     _seen.add(p)
+                    _size_seen.pop(p, None)
                     threading.Thread(target=_maybe_send, args=(p,), daemon=True).start()
         except Exception as e:
             print(f"[FTP] watcher err: {e}", flush=True)
