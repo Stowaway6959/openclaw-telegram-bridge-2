@@ -12,7 +12,8 @@ Reolink subject convention (base64-encoded UTF-8):
   "MotionTrack:Vehicle Detected from BACKYARD at ..."
 The word between "from" and "at" is the camera name set in the Reolink app.
 """
-import asyncio, os, time, subprocess, threading, base64, re
+import asyncio, os, time, subprocess, threading, base64, re, json
+import urllib.request
 from datetime import datetime
 from dotenv import load_dotenv
 from aiosmtpd.controller import Controller
@@ -63,6 +64,78 @@ def _lock_for(cam_key):
         return alert_locks[cam_key]
 
 
+# ponytail: persistent substream reader for the wired FRONT cam only. A cold
+# RTSP handshake takes 7-8s idle and >25s while the camera is busy with a
+# motion event (53 ffmpeg timeouts in smtp.log). Keeping one session open and
+# writing the newest frame to disk 1x/sec turns the alert path into a file
+# read. Air 2 is battery-powered -- never stream it continuously.
+STREAM_CAMS = {"FRONT": "/tmp/smtp_stream_front.jpg"}
+
+def _stream_reader(cam_key: str, ip: str, out: str):
+    rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_sub"
+    # Orphaned readers from a previous listener survive launchd kickstart and
+    # hold a camera RTSP slot, starving the new reader (observed 07-06).
+    subprocess.run(["pkill", "-f", f"update 1 {out}"], capture_output=True)
+    time.sleep(1)
+    while True:
+        proc = subprocess.Popen(
+            # -timeout (rtsp socket I/O, us): a stalled RTSP socket otherwise
+            # hangs ffmpeg forever with no output and no exit (observed
+            # 07:44 07-06). 15s stall -> ffmpeg errors out -> loop restarts.
+            # NOT -rw_timeout: this build's rtsp demuxer rejects it.
+            ["/opt/homebrew/bin/ffmpeg", "-y", "-loglevel", "error",
+             "-timeout", "15000000",
+             "-rtsp_transport", "tcp", "-i", rtsp,
+             "-vf", "fps=1", "-q:v", "3", "-update", "1", out],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        t0 = time.time()
+        # Watchdog: -timeout misses stalls where RTCP keepalives trickle in
+        # but no frames arrive (33s frame gap observed 07-06 with ffmpeg
+        # still "alive"). If the output file goes stale, kill and reconnect.
+        # max(last, t0) gives a fresh spawn 25s of handshake grace.
+        while proc.poll() is None:
+            time.sleep(5)
+            try:
+                last = os.path.getmtime(out)
+            except OSError:
+                last = 0
+            if time.time() - max(last, t0) > 25:
+                proc.kill()
+                proc.wait()
+                print(f"[{cam_key}] stream stale >25s -- reader killed", flush=True)
+                break
+        print(f"[{cam_key}] stream reader exited -- restarting in 5s", flush=True)
+        time.sleep(5)
+
+def _fresh_stream_frame(cam_key: str, img: str) -> bool:
+    """Copy the persistent reader's latest frame to img if it's <10s old.
+    Retries once on a truncated JPEG (ffmpeg -update writes in place)."""
+    out = STREAM_CAMS.get(cam_key)
+    if not out:
+        return False
+    reason = "?"
+    for _ in range(2):
+        try:
+            age = time.time() - os.path.getmtime(out)
+            size = os.path.getsize(out)
+            if age < 10 and size > 5_000:
+                with open(out, "rb") as f:
+                    data = f.read()
+                if data[-2:] == b"\xff\xd9":
+                    with open(img, "wb") as f:
+                        f.write(data)
+                    return True
+                reason = "truncated jpeg"
+            else:
+                reason = f"age={age:.1f}s size={size}"
+        except OSError as e:
+            reason = repr(e)
+            break
+        time.sleep(0.3)
+    print(f"[{cam_key}] stream frame rejected ({reason}) -- falling back to fetch", flush=True)
+    return False
+
+
 def _decode_subject(raw: str) -> str:
     """Reolink encodes subjects as `=?UTF-8?B?<base64>?=`. Decode to plain."""
     m = re.search(r"=\?UTF-8\?B\?([^?]+)\?=", raw)
@@ -84,32 +157,24 @@ def _match_camera(subject: str):
 
 
 def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
-    # Serialize the WHOLE per-camera pipeline. Reolink RTSP only serves one
-    # client at a time; if 3 motion emails fire in a burst, 3 threads race
-    # ffmpeg against the camera and every one hits the 25s timeout
-    # (2026-07-06 fire: main-stream grab worked in 6s solo but 100% failed
-    # under motion-burst concurrency). Cooldown skip is now checked once at
-    # the top; second event through the lock is a repeat within COOLDOWN.
+    # Serialize per-camera work so racing threads don't both pass the cooldown
+    # check + both fire an alert. Also ensures /tmp/smtp_snap_<cam>.jpg isn't
+    # being read + rewritten by two threads at once.
     with _lock_for(cam_key):
         now = time.time()
         if now - last_alert.get(cam_key, 0) < COOLDOWN:
             print(f"[{cam_key}] Cooldown -- skipping", flush=True)
             return
         last_alert[cam_key] = now
-        _grab_and_send_locked(cam_key, cam_cfg, subject_plain)
 
-
-def _grab_and_send_locked(cam_key: str, cam_cfg: dict, subject_plain: str):
     ip    = cam_cfg["ip"]
     label = cam_cfg["label"]
     img   = f"/tmp/smtp_snap_{cam_key.lower()}.jpg"
-    # ponytail: RTSP main stream (7680x2160, ~3MB) after we lowered its
-    # bitrate 10240 -> 4096 kbps in the camera config on 2026-07-06.
-    # Substream grab was consistently 8-25s and hitting the timeout;
-    # main grab is 4-5s cold with room to spare, AND is 8K quality.
-    # Revert to _sub if main starts truncating (i.e. camera CPU catches up
-    # to the lower bitrate).
-    rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_main"
+    # ponytail: pull one frame from the RTSP substream (1536x432, ~230KB)
+    # instead of Snap CGI which pulls the 7680x2160 main stream (~3MB) and
+    # truncates when the camera CPU is busy processing motion. Substream is
+    # already being encoded continuously, so this adds ~0 camera CPU load.
+    rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_sub"
 
     def _fetch_ok():
         try:
@@ -128,13 +193,16 @@ def _grab_and_send_locked(cam_key: str, cam_cfg: dict, subject_plain: str):
             f.seek(-2, 2)
             return f.read() == b"\xff\xd9"
 
-    ok = False
-    for attempt in range(2):
-        if _fetch_ok():
-            ok = True
-            if attempt: print(f"[{cam_key}] RTSP-sub OK on attempt {attempt+1}", flush=True)
-            break
-        time.sleep(1)
+    ok = _fresh_stream_frame(cam_key, img)
+    if ok:
+        print(f"[{cam_key}] frame from persistent stream", flush=True)
+    else:
+        for attempt in range(2):
+            if _fetch_ok():
+                ok = True
+                if attempt: print(f"[{cam_key}] RTSP-sub OK on attempt {attempt+1}", flush=True)
+                break
+            time.sleep(1)
     # Curl flags rationale:
     #   -4              force IPv4 -- under launchd context the IPv6 resolve
     #                   for api.telegram.org would hang past 30s while the
@@ -145,6 +213,25 @@ def _grab_and_send_locked(cam_key: str, cam_cfg: dict, subject_plain: str):
     #   compounded to 79s worst-case, blowing past the Python 60s timeout
     #   and dropping every alert as TimeoutExpired (2026-07-05 fire).
     tg_flags = ["-4", "-s", "--max-time", "20"]
+
+    caption = label
+    if not ok:
+        # Last resort before text-only: a stale stream frame up to 2 min old
+        # still shows what's in the driveway. Caption flags the age.
+        out = STREAM_CAMS.get(cam_key)
+        if out:
+            try:
+                age = time.time() - os.path.getmtime(out)
+                with open(out, "rb") as f:
+                    data = f.read()
+                if age < 120 and len(data) > 5_000 and data[-2:] == b"\xff\xd9":
+                    with open(img, "wb") as f:
+                        f.write(data)
+                    ok = True
+                    caption = f"{label} (frame {int(age)}s old)"
+                    print(f"[{cam_key}] using stale stream frame ({int(age)}s old)", flush=True)
+            except OSError:
+                pass
 
     if not ok:
         # Air 2 (battery) may not respond to Snap CGI when asleep. Send
@@ -163,7 +250,7 @@ def _grab_and_send_locked(cam_key: str, cam_cfg: dict, subject_plain: str):
 
     try:
         subprocess.run(["curl", *tg_flags, "-F", f"chat_id={CHAT_ID}",
-                        "-F", f"photo=@{img}", "-F", f"caption={label}",
+                        "-F", f"photo=@{img}", "-F", f"caption={caption}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
                        capture_output=True, timeout=45)
     except subprocess.TimeoutExpired:
@@ -196,9 +283,46 @@ class MotionHandler:
 
 print(f"📧 SMTP listener on port {SMTP_PORT}", flush=True)
 print(f"Cameras loaded: {list(CAMERAS.keys())}", flush=True)
+for _key, _out in STREAM_CAMS.items():
+    threading.Thread(target=_stream_reader,
+                     args=(_key, CAMERAS[_key]["ip"], _out),
+                     daemon=True).start()
+    print(f"[{_key}] persistent substream reader started -> {_out}", flush=True)
 controller = Controller(MotionHandler(), hostname="0.0.0.0", port=SMTP_PORT,
                         authenticator=Authenticator(), auth_required=False,
                         auth_require_tls=False)
 controller.start()
+
+
+def _reset_cam_email_push(ip):
+    """After our listener restarts, the camera's SMTP client is left with a
+    stale TCP session and drops into a multi-minute backoff -- no motion
+    emails arrive during that window. Toggling the camera's email-enable
+    off/on forces it to reconnect immediately. (Restored from 3091d44;
+    was lost in the cf5dea4 revert.)"""
+    try:
+        base = f"http://{ip}/api.cgi"
+        login = json.dumps([{"cmd": "Login", "param": {"User": {"Version": "0",
+                 "userName": CAMERA_USER, "password": CAMERA_PASSWORD}}}]).encode()
+        r = urllib.request.urlopen(base + "?cmd=Login", login, timeout=5).read()
+        tok = json.loads(r)[0]["value"]["Token"]["name"]
+        p = json.dumps([{"cmd": "GetEmailV20", "action": 0,
+                         "param": {"channel": 0}}]).encode()
+        cfg = json.loads(urllib.request.urlopen(
+            base + "?cmd=GetEmailV20&token=" + tok, p, timeout=5).read())[0]["value"]["Email"]
+        for enable in (0, 1):
+            cfg["enable"] = enable
+            payload = json.dumps([{"cmd": "SetEmailV20", "param": {"Email": cfg}}]).encode()
+            urllib.request.urlopen(base + "?cmd=SetEmailV20&token=" + tok, payload, timeout=5).read()
+            time.sleep(2)
+        print(f"[{ip}] email push reset", flush=True)
+    except Exception as e:
+        print(f"[{ip}] email reset err: {e}", flush=True)
+
+
+# ponytail: FRONT-only reset. BACK is intentionally disabled at the camera;
+# a blanket reset would flip its enable back on.
+threading.Thread(target=_reset_cam_email_push, args=(CAMERAS["FRONT"]["ip"],), daemon=True).start()
+
 print("Ready -- waiting for camera emails...", flush=True)
 asyncio.get_event_loop().run_forever()
