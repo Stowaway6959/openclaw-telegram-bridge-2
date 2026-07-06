@@ -73,19 +73,40 @@ def _maybe_send(path):
             try: os.remove(path)
             except OSError: pass
             return
-    else:
-        # JPEG end-marker check.
+        # ponytail: extract a frame from the MP4 and send as photo. Camera's
+        # own JPEG encoder produces solid gray content during motion (verified
+        # via file inspection 2026-07-06 -- ffd8/ffd9 both present but content
+        # is gray). The MP4 is a real recording so its frames are valid.
+        # Pick frame at 2s in (skip camera's startup gray frames).
+        frame_path = path + ".frame.jpg"
         try:
-            with open(path, "rb") as f:
-                f.seek(-2, 2)
-                end = f.read()
-            if end != b"\xff\xd9":
-                print(f"[FTP] rejected {os.path.basename(path)} -- truncated JPEG", flush=True)
+            r = subprocess.run(
+                ["/opt/homebrew/bin/ffmpeg", "-y", "-ss", "2", "-i", path,
+                 "-frames:v", "1", "-q:v", "3", frame_path],
+                capture_output=True, timeout=15)
+            if r.returncode == 0 and os.path.exists(frame_path) and os.path.getsize(frame_path) > 5_000:
+                print(f"[FTP] extracted frame from {os.path.basename(path)}", flush=True)
+                _send(frame_path)
                 try: os.remove(path)
                 except OSError: pass
                 return
-        except OSError:
+            print(f"[FTP] frame extract failed on {os.path.basename(path)} -- sending video instead", flush=True)
+        except subprocess.TimeoutExpired:
+            print(f"[FTP] ffmpeg timeout extracting frame -- sending video instead", flush=True)
+        _send(path)
+        return
+    # JPEG path: end-marker check, but note camera JPEGs are known-broken now.
+    try:
+        with open(path, "rb") as f:
+            f.seek(-2, 2)
+            end = f.read()
+        if end != b"\xff\xd9":
+            print(f"[FTP] rejected {os.path.basename(path)} -- truncated JPEG", flush=True)
+            try: os.remove(path)
+            except OSError: pass
             return
+    except OSError:
+        return
     _send(path)
 
 
