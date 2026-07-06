@@ -12,7 +12,8 @@ Reolink subject convention (base64-encoded UTF-8):
   "MotionTrack:Vehicle Detected from BACKYARD at ..."
 The word between "from" and "at" is the camera name set in the Reolink app.
 """
-import asyncio, os, time, subprocess, threading, base64, re
+import asyncio, os, time, subprocess, threading, base64, re, json
+import urllib.request
 from datetime import datetime
 from dotenv import load_dotenv
 from aiosmtpd.controller import Controller
@@ -77,7 +78,7 @@ def _stream_reader(cam_key: str, ip: str, out: str):
     subprocess.run(["pkill", "-f", f"update 1 {out}"], capture_output=True)
     time.sleep(1)
     while True:
-        subprocess.run(
+        proc = subprocess.Popen(
             # -timeout (rtsp socket I/O, us): a stalled RTSP socket otherwise
             # hangs ffmpeg forever with no output and no exit (observed
             # 07:44 07-06). 15s stall -> ffmpeg errors out -> loop restarts.
@@ -86,7 +87,23 @@ def _stream_reader(cam_key: str, ip: str, out: str):
              "-timeout", "15000000",
              "-rtsp_transport", "tcp", "-i", rtsp,
              "-vf", "fps=1", "-q:v", "3", "-update", "1", out],
-            capture_output=True)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        t0 = time.time()
+        # Watchdog: -timeout misses stalls where RTCP keepalives trickle in
+        # but no frames arrive (33s frame gap observed 07-06 with ffmpeg
+        # still "alive"). If the output file goes stale, kill and reconnect.
+        # max(last, t0) gives a fresh spawn 25s of handshake grace.
+        while proc.poll() is None:
+            time.sleep(5)
+            try:
+                last = os.path.getmtime(out)
+            except OSError:
+                last = 0
+            if time.time() - max(last, t0) > 25:
+                proc.kill()
+                proc.wait()
+                print(f"[{cam_key}] stream stale >25s -- reader killed", flush=True)
+                break
         print(f"[{cam_key}] stream reader exited -- restarting in 5s", flush=True)
         time.sleep(5)
 
@@ -197,6 +214,25 @@ def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
     #   and dropping every alert as TimeoutExpired (2026-07-05 fire).
     tg_flags = ["-4", "-s", "--max-time", "20"]
 
+    caption = label
+    if not ok:
+        # Last resort before text-only: a stale stream frame up to 2 min old
+        # still shows what's in the driveway. Caption flags the age.
+        out = STREAM_CAMS.get(cam_key)
+        if out:
+            try:
+                age = time.time() - os.path.getmtime(out)
+                with open(out, "rb") as f:
+                    data = f.read()
+                if age < 120 and len(data) > 5_000 and data[-2:] == b"\xff\xd9":
+                    with open(img, "wb") as f:
+                        f.write(data)
+                    ok = True
+                    caption = f"{label} (frame {int(age)}s old)"
+                    print(f"[{cam_key}] using stale stream frame ({int(age)}s old)", flush=True)
+            except OSError:
+                pass
+
     if not ok:
         # Air 2 (battery) may not respond to Snap CGI when asleep. Send
         # text-only alert so the event still surfaces.
@@ -214,7 +250,7 @@ def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
 
     try:
         subprocess.run(["curl", *tg_flags, "-F", f"chat_id={CHAT_ID}",
-                        "-F", f"photo=@{img}", "-F", f"caption={label}",
+                        "-F", f"photo=@{img}", "-F", f"caption={caption}",
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
                        capture_output=True, timeout=45)
     except subprocess.TimeoutExpired:
@@ -256,5 +292,36 @@ controller = Controller(MotionHandler(), hostname="0.0.0.0", port=SMTP_PORT,
                         authenticator=Authenticator(), auth_required=False,
                         auth_require_tls=False)
 controller.start()
+
+
+def _reset_cam_email_push(ip):
+    """After our listener restarts, the camera's SMTP client is left with a
+    stale TCP session and drops into a multi-minute backoff -- no motion
+    emails arrive during that window. Toggling the camera's email-enable
+    off/on forces it to reconnect immediately. (Restored from 3091d44;
+    was lost in the cf5dea4 revert.)"""
+    try:
+        base = f"http://{ip}/api.cgi"
+        login = json.dumps([{"cmd": "Login", "param": {"User": {"Version": "0",
+                 "userName": CAMERA_USER, "password": CAMERA_PASSWORD}}}]).encode()
+        r = urllib.request.urlopen(base + "?cmd=Login", login, timeout=5).read()
+        tok = json.loads(r)[0]["value"]["Token"]["name"]
+        p = json.dumps([{"cmd": "GetEmailV20", "action": 0,
+                         "param": {"channel": 0}}]).encode()
+        cfg = json.loads(urllib.request.urlopen(
+            base + "?cmd=GetEmailV20&token=" + tok, p, timeout=5).read())[0]["value"]["Email"]
+        for enable in (0, 1):
+            cfg["enable"] = enable
+            payload = json.dumps([{"cmd": "SetEmailV20", "param": {"Email": cfg}}]).encode()
+            urllib.request.urlopen(base + "?cmd=SetEmailV20&token=" + tok, payload, timeout=5).read()
+            time.sleep(2)
+        print(f"[{ip}] email push reset", flush=True)
+    except Exception as e:
+        print(f"[{ip}] email reset err: {e}", flush=True)
+
+
+for _ip in {c["ip"] for c in CAMERAS.values()}:
+    threading.Thread(target=_reset_cam_email_push, args=(_ip,), daemon=True).start()
+
 print("Ready -- waiting for camera emails...", flush=True)
 asyncio.get_event_loop().run_forever()
