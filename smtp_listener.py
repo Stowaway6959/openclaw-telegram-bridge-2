@@ -97,11 +97,13 @@ def grab_and_send(cam_key: str, cam_cfg: dict, subject_plain: str):
     ip    = cam_cfg["ip"]
     label = cam_cfg["label"]
     img   = f"/tmp/smtp_snap_{cam_key.lower()}.jpg"
-    # ponytail: pull one frame from the RTSP substream (1536x432, ~230KB)
-    # instead of Snap CGI which pulls the 7680x2160 main stream (~3MB) and
-    # truncates when the camera CPU is busy processing motion. Substream is
-    # already being encoded continuously, so this adds ~0 camera CPU load.
-    rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_sub"
+    # ponytail: RTSP main stream (7680x2160, ~3MB) after we lowered its
+    # bitrate 10240 -> 4096 kbps in the camera config on 2026-07-06.
+    # Substream grab was consistently 8-25s and hitting the timeout;
+    # main grab is 4-5s cold with room to spare, AND is 8K quality.
+    # Revert to _sub if main starts truncating (i.e. camera CPU catches up
+    # to the lower bitrate).
+    rtsp = f"rtsp://{CAMERA_USER}:{CAMERA_PASSWORD}@{ip}:554/h264Preview_01_main"
 
     def _fetch_ok():
         try:
