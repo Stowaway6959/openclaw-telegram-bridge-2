@@ -99,12 +99,12 @@ def _reset_email_push():
     without this reset, real motion events get missed for 3-10 minutes
     after every restart."""
     try:
-        base = f"http://{CAMERA_IP}/api.cgi"
+        base = f"http://{CAMERA_IP}/cgi-bin/api.cgi"
         login = json.dumps([{"cmd": "Login", "param": {"User": {"Version": "0",
                  "userName": CAMERA_USER, "password": CAMERA_PASSWORD}}}]).encode()
         tok = json.loads(urllib.request.urlopen(base + "?cmd=Login", login, timeout=5).read())[0]["value"]["Token"]["name"]
-        p = json.dumps([{"cmd": "GetEmailV20", "action": 0,
-                         "param": {"channel": 0}}]).encode()
+        # camera rejects GetEmailV20 with any "param" field ("param error" rspCode -4)
+        p = json.dumps([{"cmd": "GetEmailV20", "action": 0}]).encode()
         cfg = json.loads(urllib.request.urlopen(
             base + "?cmd=GetEmailV20&token=" + tok, p, timeout=5).read())[0]["value"]["Email"]
         for enable in (0, 1):
