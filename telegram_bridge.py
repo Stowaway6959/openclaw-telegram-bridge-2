@@ -3,7 +3,7 @@ import subprocess, time, json, os, threading
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from EventKit import EKEventStore, EKEntityTypeEvent, EKEntityTypeReminder
-import urllib.request, urllib.parse
+import urllib.request, urllib.parse, urllib.error
 import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 import anthropic
@@ -44,20 +44,32 @@ def _in_quiet_hours():
     h = time.localtime().tm_hour
     return h >= 22 or h < 7
 
+# Retry transient network blips (TLS handshake timeout, connection reset, read timeout).
+# ponytail: a read-timeout AFTER Telegram accepted a sendMessage will retry and can double-post;
+# acceptable for a personal bot -- a duplicate beats a dropped briefing. Raise per-message locks if that changes.
+def _http(req, timeout=10, tries=3):
+    for i in range(tries):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout).read()
+        except (urllib.error.URLError, OSError):
+            if i == tries - 1:
+                raise
+            time.sleep(2 ** i)  # 1s, 2s
+
 def send_telegram(message, photo_path=None, force=False):
     if _in_quiet_hours() and not force:
         print(f"Telegram suppressed (quiet hours 22:00-07:00): {message[:60]}")
         return
     try:
         if photo_path:
-            subprocess.run(['curl', '-s', '-F', f'chat_id={CHAT_ID}', '-F', f'photo=@{photo_path}',
-                            '-F', f'caption={message}',
+            subprocess.run(['curl', '-s', '--retry', '2', '--retry-connrefused', '-F', f'chat_id={CHAT_ID}',
+                            '-F', f'photo=@{photo_path}', '-F', f'caption={message}',
                             f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto'],
                            capture_output=True)
         else:
             url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
             data = urllib.parse.urlencode({'chat_id': CHAT_ID, 'text': message}).encode()
-            urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=10)
+            _http(urllib.request.Request(url, data=data), timeout=10)
     except Exception as e:
         print(f"Telegram error: {e}")
 
@@ -442,10 +454,12 @@ def listen_for_telegram():
     threading.Thread(target=scheduler, daemon=True).start()
     print("⏰ Scheduler active: 6:30am morning, 9:30am market open, 4pm market close, 6pm evening")
     request_calendar_access()
+    poll_fails = 0
     while True:
         try:
             url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
             data = json.loads(urllib.request.urlopen(urllib.request.Request(url), timeout=35).read())
+            poll_fails = 0
             if data['ok'] and data['result']:
                 for update in data['result']:
                     last_update_id = update['update_id']
@@ -515,6 +529,12 @@ def listen_for_telegram():
         except KeyboardInterrupt:
             print("\n👋 Stopped")
             break
+        except (urllib.error.URLError, OSError) as e:
+            # long-poll blips (timeout / connection reset) are expected; stay quiet unless sustained
+            poll_fails += 1
+            if poll_fails == 5:  # ~real outage, not a blip -- surface once
+                print(f"Poll unstable ({poll_fails}x): {e}")
+            time.sleep(min(2 * poll_fails, 30))  # back off harder the longer it's down
         except Exception as e:
             print(f"Error: {e}")
             time.sleep(5)
