@@ -77,8 +77,27 @@ def log(msg):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
 
 
+def uptime_seconds():
+    """Seconds since boot, via sysctl kern.boottime. -1 if unreadable."""
+    try:
+        import time as _t
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                             capture_output=True, text=True).stdout
+        boot = int(out.split("sec =")[1].split(",")[0].strip())
+        return _t.time() - boot
+    except Exception:
+        return -1
+
+
 def main():
     host = mac_ip()
+    # Boot grace: right after a reboot the smtp job may still be starting under
+    # launchd. Skip one cycle so we never "heal" a job that was merely slow and
+    # never fire a false self-heal ping on every boot. Next tick (180s) covers it.
+    up = uptime_seconds()
+    if 0 <= up < 90:
+        log(f"boot grace ({up:.0f}s uptime) -- skip this tick")
+        return
     # Two strikes 5s apart, so a single transient blip never triggers a restart.
     if listener_ok(host) or (time.sleep(5) or listener_ok(host)):
         log(f"ok  listener alive on {host}:{PORT}")
