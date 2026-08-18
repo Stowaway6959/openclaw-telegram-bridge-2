@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>TELEGRAM_CHAT_ID</key>
+		<string>__TELEGRAM_CHAT_ID__</string>
+		<key>TELEGRAM_TOKEN</key>
+		<string>__TELEGRAM_TOKEN__</string>
+	</dict>
+	<key>Label</key>
+	<string>com.reolink.liveness-watchdog</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/dc/bin/reolink-liveness.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/dc/Library/Logs/reolink-bridge-air2/liveness-watchdog.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/dc/Library/Logs/reolink-bridge-air2/liveness-watchdog.log</string>
+	<key>StartInterval</key>
+	<integer>180</integer>
+</dict>
+</plist>
