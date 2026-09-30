@@ -29,6 +29,10 @@ except Exception:
     pass
 TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+# Off-box deadman (healthchecks.io). The Telegram notify above cannot report that
+# THIS Mac died, because it runs on the Mac it is watching. Set HC_REOLINK in .env
+# to a ping URL; unset means the ping is skipped entirely.
+HC_URL  = os.environ.get("HC_REOLINK", "")
 PORT = 2525
 JOBS = ["com.reolink.smtp-air2", "com.reolink.bridge-air2"]
 
@@ -75,6 +79,21 @@ def notify(text):
     ], capture_output=True)
 
 
+def hc_ping():
+    """Tell healthchecks.io the listener is alive. Deliberately pinged ONLY on the
+    healthy path: if the listener is wedged and cannot be healed, the ping stops,
+    the check goes red after its grace period, and the owner hears about it
+    off-box. Must never change this watchdog's own outcome, hence the blanket
+    except -- a DNS failure or dead uplink is not a reason to skip a kickstart."""
+    if not HC_URL:
+        return
+    try:
+        subprocess.run(["curl", "-fsS", "--max-time", "10", "-o", "/dev/null", HC_URL],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass
+
+
 def log(msg):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
 
@@ -103,6 +122,7 @@ def main():
     # Two strikes 5s apart, so a single transient blip never triggers a restart.
     if listener_ok(host) or (time.sleep(5) or listener_ok(host)):
         log(f"ok  listener alive on {host}:{PORT}")
+        hc_ping()
         return
     log(f"DOWN  listener wedged on {host}:{PORT} -- kickstarting {JOBS}")
     kickstart()
