@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import subprocess, time, json, os, threading
+import subprocess, time, json, os, threading, socket
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from EventKit import EKEventStore, EKEntityTypeEvent, EKEntityTypeReminder
@@ -25,6 +25,10 @@ DEFAULT_LOCATION = os.getenv("DEFAULT_LOCATION", "65802")
 GOLDAPI_KEY      = os.getenv("GOLDAPI_KEY")
 NTFY_TOPIC       = os.getenv("NTFY_TOPIC", "openclaw-sar")
 NOTES_FILE       = os.path.join(os.path.dirname(__file__), "notes.txt")
+# Identifies which Mac sent a scheduled message. Both Macs run this same "air2"
+# codebase against one shared bot token + chat, so they are otherwise
+# indistinguishable. Applied to proactive sends only, not interactive replies.
+TAG              = f" · [{socket.gethostname().split('.')[0]}]"
 
 ai_client  = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 store      = EKEventStore.alloc().init()
@@ -410,27 +414,27 @@ def send_auto_briefing(btype):
     if btype == "morning":
         request_calendar_access()
         msg = get_briefing()
-        send_telegram(msg, force=True)  # ponytail: scheduled briefings bypass 22-07 quiet hours
+        send_telegram(msg + TAG, force=True)  # ponytail: scheduled briefings bypass 22-07 quiet hours
         send_ntfy("Morning Briefing", msg[:200], "default")
         print("Morning briefing sent!")
     elif btype == "evening":
         request_calendar_access()
         msg = get_evening_briefing()
-        send_telegram(msg, force=True)  # ponytail: scheduled briefings bypass 22-07 quiet hours
+        send_telegram(msg + TAG, force=True)  # ponytail: scheduled briefings bypass 22-07 quiet hours
         send_ntfy("Evening Briefing", msg[:200], "default")
         print("Evening briefing sent!")
     elif btype == "hourly_camera":
         img = capture_camera()
         if img:
             ts = datetime.now().strftime("%I:%M %p")
-            send_telegram(f"📷 {ts}", img)
+            send_telegram(f"📷 {ts}" + TAG, img)
             send_ntfy("Camera Snapshot", f"Snapshot taken at {ts}", "low")
             print("Camera sent!")
     elif btype == "market_open":
-        send_telegram(f"🔔 Market Open\n\n{get_markets()}")
+        send_telegram(f"🔔 Market Open\n\n{get_markets()}" + TAG)
         print("Market open sent!")
     elif btype == "market_close":
-        send_telegram(f"🔔 Market Close\n\n{get_markets()}")
+        send_telegram(f"🔔 Market Close\n\n{get_markets()}" + TAG)
         print("Market close sent!")
 
 def scheduler():

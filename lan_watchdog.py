@@ -7,7 +7,7 @@ gray photos are ALWAYS a symptom of high LAN latency between Mac and camera.
 
 Uses the same TELEGRAM_TOKEN + TELEGRAM_CHAT_ID as smtp_listener.
 """
-import os, subprocess, sys
+import os, subprocess, sys, socket
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -33,6 +33,8 @@ def ping_avg_ms():
     return None
 
 def alert(text):
+    # Tag identifies which Mac sent this; both Macs share one bot token + chat.
+    text += f" · [{socket.gethostname().split('.')[0]}]"
     subprocess.run([
         "curl", "-4", "-s", "--max-time", "20",
         "-F", f"chat_id={CHAT_ID}",

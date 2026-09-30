@@ -14,7 +14,7 @@ never spams the channel.
 
 Run every 3 min via com.reolink.liveness-watchdog.
 """
-import os, sys, time, smtplib, subprocess
+import os, sys, time, smtplib, subprocess, socket
 from datetime import datetime
 
 HERE = "/Users/dc/Desktop/APPS/reolink-telegram-bridge-air2"
@@ -66,6 +66,8 @@ def kickstart():
 def notify(text):
     if not TOKEN or not CHAT_ID:
         return
+    # Tag identifies which Mac self-healed; both Macs share one bot token + chat.
+    text += f" · [{socket.gethostname().split('.')[0]}]"
     subprocess.run([
         "curl", "-4", "-s", "--max-time", "20",
         "-F", f"chat_id={CHAT_ID}", "-F", f"text={text}",

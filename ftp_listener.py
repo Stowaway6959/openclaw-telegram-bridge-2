@@ -6,7 +6,7 @@ path in the camera firmware; some users report FTP delivers clean JPEGs
 when SMTP silently truncates. Camera pushes files to ftp_root/motion/,
 we forward each new JPEG to Telegram and delete it.
 """
-import os, time, subprocess, threading
+import os, time, subprocess, threading, socket
 from datetime import datetime
 from dotenv import load_dotenv
 from pyftpdlib.authorizers import DummyAuthorizer
@@ -22,7 +22,7 @@ FTP_PASS       = os.environ.get("FTP_PASS", "reolink-drop-2026")
 FTP_PORT       = int(os.environ.get("FTP_PORT", "2121"))
 ROOT           = os.path.join(os.path.dirname(__file__), "ftp_root")
 COOLDOWN       = 15
-LABEL          = "🚨 OUT FRONT (FTP) 🚨"
+LABEL          = "🚨 OUT FRONT (FTP) 🚨" + f" · [{socket.gethostname().split('.')[0]}]"
 
 os.makedirs(os.path.join(ROOT, "motion"), exist_ok=True)
 _last_send = [0.0]

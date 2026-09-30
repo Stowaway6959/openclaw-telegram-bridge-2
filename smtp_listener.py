@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Local SMTP server -- receives Reolink motion emails and sends Telegram alerts."""
-import asyncio, os, time, subprocess, threading, email, json
+import asyncio, os, time, subprocess, threading, email, json, socket
 import urllib.request
 from datetime import datetime
 from dotenv import load_dotenv
@@ -16,6 +16,9 @@ CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
 COOLDOWN        = 15
 last_alert      = [0]
+# Identifies which Mac sent the alert. Both Macs run this same "air2" codebase and
+# share one bot token + chat, so without this the two are indistinguishable.
+TAG             = f" · [{socket.gethostname().split('.')[0]}]"
 
 def _extract_jpeg(raw_bytes):
     """Reolink attaches a JPEG to plain 'Person/Vehicle Detected' emails.
@@ -43,7 +46,7 @@ def grab_and_send(subject, attached=None):
     img     = "/tmp/smtp_snap.jpg"
     img_out = "/tmp/smtp_snap_small.jpg"
     cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
-    label   = "🚨 OUT FRONT 🚨"
+    label   = "🚨 OUT FRONT 🚨" + TAG
 
     if attached:
         # ponytail: use the JPEG the camera attached to the email. Saves the
