@@ -423,13 +423,6 @@ def send_auto_briefing(btype):
         send_telegram(msg + TAG, force=True)  # ponytail: scheduled briefings bypass 22-07 quiet hours
         send_ntfy("Evening Briefing", msg[:200], "default")
         print("Evening briefing sent!")
-    elif btype == "hourly_camera":
-        img = capture_camera()
-        if img:
-            ts = datetime.now().strftime("%I:%M %p")
-            send_telegram(f"📷 {ts}" + TAG, img)
-            send_ntfy("Camera Snapshot", f"Snapshot taken at {ts}", "low")
-            print("Camera sent!")
     elif btype == "market_open":
         send_telegram(f"🔔 Market Open\n\n{get_markets()}" + TAG)
         print("Market open sent!")
