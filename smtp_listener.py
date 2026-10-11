@@ -15,7 +15,10 @@ CAMERA_PASSWORD = os.environ["CAMERA_PASSWORD"]
 CAMERA_IP       = os.environ.get("CAMERA_HOST", "192.168.1.199")
 SMTP_PORT       = 2525
 COOLDOWN        = 15
-last_alert      = [0]
+last_alert      = {}
+# Sender IP -> alert label. Anything not listed is treated as the front cam.
+BACK_IP         = os.environ.get("CAMERA2_HOST", "192.168.1.200")
+LABELS          = {CAMERA_IP: "🚨 OUT FRONT 🚨", BACK_IP: "🚨 OUT BACK 🚨"}
 # Identifies which Mac sent the alert. Both Macs run this same "air2" codebase and
 # share one bot token + chat, so without this the two are indistinguishable.
 TAG             = f" · [{socket.gethostname().split('.')[0]}]"
@@ -36,17 +39,17 @@ def _extract_jpeg(raw_bytes):
     return None
 
 
-def grab_and_send(subject, attached=None):
+def grab_and_send(subject, attached=None, cam_ip=CAMERA_IP):
     now = time.time()
-    if now - last_alert[0] < COOLDOWN:
+    if now - last_alert.get(cam_ip, 0) < COOLDOWN:
         print("Cooldown -- skipping", flush=True)
         return
-    last_alert[0] = now
+    last_alert[cam_ip] = now
 
-    img     = "/tmp/smtp_snap.jpg"
-    img_out = "/tmp/smtp_snap_small.jpg"
-    cam_url = f"http://{CAMERA_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
-    label   = "🚨 OUT FRONT 🚨" + TAG
+    img     = f"/tmp/smtp_snap_{cam_ip}.jpg"
+    img_out = f"/tmp/smtp_snap_small_{cam_ip}.jpg"
+    cam_url = f"http://{cam_ip}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
+    label   = LABELS[cam_ip] + TAG
 
     if attached:
         # ponytail: use the JPEG the camera attached to the email. Saves the
@@ -92,7 +95,9 @@ class MotionHandler:
         print(f"Email received: {subject}"
               + (f"  (attached {len(attached)}B)" if attached else "  (no attach)"),
               flush=True)
-        threading.Thread(target=grab_and_send, args=(subject, attached), daemon=True).start()
+        peer    = session.peer[0] if session.peer else CAMERA_IP
+        cam_ip  = peer if peer in LABELS else CAMERA_IP
+        threading.Thread(target=grab_and_send, args=(subject, attached, cam_ip), daemon=True).start()
         return "250 OK"
 
 
