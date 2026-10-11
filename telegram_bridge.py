@@ -437,10 +437,10 @@ def scheduler():
     while True:
         now   = datetime.now(TZ)
         today = now.date()
-        if now.hour == 6 and now.minute == 0 and last_morning_sent != today:
+        if now.hour == 6 and now.minute == 30 and last_morning_sent != today:
             send_auto_briefing("morning")
             last_morning_sent = today
-        if now.hour == 18 and now.minute == 0 and last_evening_sent != today:
+        if now.hour == 19 and now.minute == 0 and last_evening_sent != today:
             send_auto_briefing("evening")
             last_evening_sent = today
         time.sleep(30)
@@ -449,7 +449,7 @@ def listen_for_telegram():
     global last_update_id
     print("🤖 Telegram bridge #2 running (Claude AI)")
     threading.Thread(target=scheduler, daemon=True).start()
-    print("⏰ Scheduler active: 6:30am morning, 9:30am market open, 4pm market close, 6pm evening")
+    print("⏰ Scheduler active: 6:30am morning, 9:30am market open, 4pm market close, 7pm evening")
     request_calendar_access()
     poll_fails = 0
     while True:
