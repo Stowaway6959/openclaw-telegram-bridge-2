@@ -22,6 +22,13 @@ LABELS          = {CAMERA_IP: "🚨 OUT FRONT 🚨", BACK_IP: "🚨 OUT BACK �
 # Identifies which Mac sent the alert. Both Macs run this same "air2" codebase and
 # share one bot token + chat, so without this the two are indistinguishable.
 TAG             = f" · [{socket.gethostname().split('.')[0]}]"
+# Rear cam goes out as bare photos (no caption) from the Openclaw2 bot, same as the on-request grab.
+# ponytail: Keychain item written by hand on each Mac; if missing, rear falls back to the main bot + label.
+try:
+    REAR_TOKEN = subprocess.check_output(["security", "find-generic-password", "-s", "openclaw2-cam-bot", "-w"],
+                                         text=True, stderr=subprocess.DEVNULL).strip()
+except Exception:
+    REAR_TOKEN = ""
 
 def _extract_jpeg(raw_bytes):
     """Reolink attaches a JPEG to plain 'Person/Vehicle Detected' emails.
@@ -50,6 +57,8 @@ def grab_and_send(subject, attached=None, cam_ip=CAMERA_IP):
     img_out = f"/tmp/smtp_snap_small_{cam_ip}.jpg"
     cam_url = f"http://{cam_ip}/cgi-bin/api.cgi?cmd=Snap&channel=0&user={CAMERA_USER}&password={CAMERA_PASSWORD}"
     label   = LABELS[cam_ip] + TAG
+    bare    = cam_ip == BACK_IP and bool(REAR_TOKEN)
+    token   = REAR_TOKEN if bare else TELEGRAM_TOKEN
 
     if attached:
         # ponytail: use the JPEG the camera attached to the email. Saves the
@@ -64,8 +73,8 @@ def grab_and_send(subject, attached=None, cam_ip=CAMERA_IP):
         subprocess.run(["sips", "--resampleWidth", "1280", img, "--out", img_out], capture_output=True)
         send = img_out if os.path.exists(img_out) and os.path.getsize(img_out) > 5000 else img
         subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}", "-F", f"photo=@{send}",
-                        "-F", f"caption={label}",
-                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"],
+                        *([] if bare else ["-F", f"caption={label}"]),
+                        f"https://api.telegram.org/bot{token}/sendPhoto"],
                        capture_output=True, timeout=30)
         print(f"{label} sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
     else:
@@ -73,7 +82,7 @@ def grab_and_send(subject, attached=None, cam_ip=CAMERA_IP):
         # failed. Text-only fallback so the event still surfaces.
         subprocess.run(["curl", "-s", "-F", f"chat_id={CHAT_ID}",
                         "-F", f"text={label} (no image)\n{subject}",
-                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"],
+                        f"https://api.telegram.org/bot{token}/sendMessage"],
                        capture_output=True, timeout=15)
         print(f"{label} text-only sent at {datetime.now().strftime('%H:%M:%S')}", flush=True)
 
