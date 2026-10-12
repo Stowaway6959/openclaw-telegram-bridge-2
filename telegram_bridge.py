@@ -144,12 +144,12 @@ def get_weather(location=None, days=1):
         current, loc = data['current'], data['location']
         if days == 1:
             forecast = data['forecast']['forecastday'][0]['day']
-            return (f"🌤 {loc['name']}, {loc['region']}:\n\n"
-                    f"Current: {current['temp_f']}°F, {current['condition']['text']}\n"
-                    f"High: {forecast['maxtemp_f']}°F, Low: {forecast['mintemp_f']}°F\n"
-                    f"Rain: {forecast['daily_chance_of_rain']}%")
+            return (f"🌤 {loc['name']}, {loc['region']}\n"
+                    f"{current['temp_f']}°F {current['condition']['text']} · "
+                    f"High {forecast['maxtemp_f']}° / Low {forecast['mintemp_f']}° · "
+                    f"Rain {forecast['daily_chance_of_rain']}%")
         else:
-            r = "🌤 7-Day Forecast:\n\n"
+            r = "🌤 Forecast:\n"
             for day in data['forecast']['forecastday']:
                 ds  = datetime.strptime(day['date'], '%Y-%m-%d').strftime('%a %m/%d')
                 dd  = day['day']
@@ -193,7 +193,7 @@ def _fetch_reddit(subreddit, count):
 
 def get_news():
     try:
-        result = "📰 News:\n\n"
+        result = "📰 News:\n"
         rss_feeds = [
             ("https://feeds.npr.org/1001/rss.xml", 2),
             ("https://www.ozarksfirst.com/feed", 2),
@@ -201,12 +201,12 @@ def get_news():
         for url, count in rss_feeds:
             try:
                 for title, link in _fetch_rss(url, count):
-                    result += f"• {title}\n  {link}\n\n" if link else f"• {title}\n\n"
+                    result += f"• {title}\n  {link}\n" if link else f"• {title}\n"
             except:
                 continue
         try:
             for title, link in _fetch_reddit("springfieldMO", 3):
-                result += f"• 🟠 {title}\n  {link}\n\n"
+                result += f"• 🟠 {title}\n  {link}\n"
         except:
             pass
         return result.strip()
@@ -354,7 +354,8 @@ def get_calendar_today():
     result = f"📅 Today ({len(events)} events):\n\n"
     for e in events:
         dt = datetime.fromtimestamp(e.startDate().timeIntervalSince1970())
-        result += f"• {dt.strftime('%I:%M %p')} - {e.title()}\n"
+        when = "All day" if e.isAllDay() else dt.strftime('%I:%M %p')
+        result += f"• {when} - {e.title()}\n"
     return result.strip()
 
 def capture_camera():
@@ -395,10 +396,12 @@ def get_briefing():
     e    = get_calendar_today()
     r    = get_reminders_today()
     news = get_news()
-    parts = [f"☀️ Good Morning!\n\n{m}\n\n{w}"]
-    if sun:  parts.append(sun)
-    parts.append(e)
-    parts.append(r)
+    parts = [f"☀️ Good Morning!\n\n{m}", f"{w}\n{sun}" if sun else w]
+    # ponytail: two empty-state lines collapse to one; real events/reminders still list in full
+    if e.startswith("📅 No events") and r.startswith("✅ No reminders"):
+        parts.append("📅 Nothing scheduled or due today")
+    else:
+        parts += [e, r]
     if news: parts.append(news)
     return "\n\n".join(parts)
 
@@ -407,7 +410,7 @@ def get_evening_briefing():
     w    = get_weather(DEFAULT_LOCATION, 2)
     r    = get_reminders_tomorrow()
     news = get_news()
-    parts = [f"🌙 Good Evening!\n\n{m}\n\n{w}\n\n{r}"]
+    parts = [f"🌙 Good Evening!\n\n{m}", w.strip(), r]
     if news: parts.append(news)
     return "\n\n".join(parts)
 
