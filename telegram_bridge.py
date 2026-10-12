@@ -113,15 +113,16 @@ def get_markets():
         result += "₿ Bitcoin: Unavailable\n"
 
     try:
-        if GOLDAPI_KEY:
+        try:
+            if not GOLDAPI_KEY:
+                raise ValueError("no key")
             req  = urllib.request.Request("https://www.goldapi.io/api/XAU/USD",
                                           headers={"x-access-token": GOLDAPI_KEY, "Content-Type": "application/json"})
             data = json.loads(urllib.request.urlopen(req, timeout=10).read())
-            chg  = data.get('ch_percentage', 0)
-            result += f"🥇 Gold: ${data['price']:,.2f}/oz {_arrow(chg)}\n"
-        else:
+            price, chg = data['price'], data.get('ch_percentage', 0)
+        except Exception:  # ponytail: goldapi quota/outage falls back to Yahoo, same source silver uses
             price, chg = _yahoo_price_change("GC=F")
-            result += f"🥇 Gold: ${price:,.2f}/oz {_arrow(chg)}\n"
+        result += f"🥇 Gold: ${price:,.2f}/oz {_arrow(chg)}\n"
     except:
         result += "🥇 Gold: Unavailable\n"
 
