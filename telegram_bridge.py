@@ -389,6 +389,12 @@ def ask_ai(question):
     except Exception as e:
         return f"AI error: {e}"
 
+def _no_icloud():
+    # ponytail: zero calendars + zero reminder lists = no iCloud account, so empty results would be false zeros
+    return not store.calendarsForEntityType_(EKEntityTypeEvent) and not store.calendarsForEntityType_(EKEntityTypeReminder)
+
+NO_ICLOUD_MSG = "📅 Calendar & reminders unavailable: not logged in to iCloud on " + socket.gethostname().split('.')[0]
+
 def get_briefing():
     m    = get_markets()
     w    = get_weather(DEFAULT_LOCATION, 1)
@@ -398,7 +404,9 @@ def get_briefing():
     news = get_news()
     parts = [f"☀️ Good Morning!\n\n{m}", f"{w}\n{sun}" if sun else w]
     # ponytail: two empty-state lines collapse to one; real events/reminders still list in full
-    if e.startswith("📅 No events") and r.startswith("✅ No reminders"):
+    if _no_icloud():
+        parts.append(NO_ICLOUD_MSG)
+    elif e.startswith("📅 No events") and r.startswith("✅ No reminders"):
         parts.append("📅 Nothing scheduled or due today")
     else:
         parts += [e, r]
@@ -410,7 +418,7 @@ def get_evening_briefing():
     w    = get_weather(DEFAULT_LOCATION, 2)
     r    = get_reminders_tomorrow()
     news = get_news()
-    parts = [f"🌙 Good Evening!\n\n{m}", w.strip(), r]
+    parts = [f"🌙 Good Evening!\n\n{m}", w.strip(), NO_ICLOUD_MSG if _no_icloud() else r]
     if news: parts.append(news)
     return "\n\n".join(parts)
 
